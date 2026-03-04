@@ -7,7 +7,7 @@
 
 A GNOME Shell extension that lets you set any video as your lock screen background.
 
-> ⚠️ Only tested on GNOME 47-49 so far. Should work on GNOME 45+ but not guaranteed. Try at your own risk.
+> ⚠️ Only works on GNOME 47-49 so far. There are some issues with GNOME 46 and I'm trying my best to resolve them.
 
 > 💡 If you experience issues, check the **Debug** section in preferences for workarounds.
 
