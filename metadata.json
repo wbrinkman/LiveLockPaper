@@ -6,7 +6,6 @@
   ],
   "settings-schema": "org.gnome.shell.extensions.live-lockscreen",
   "shell-version": [
-    "46",
     "47",
     "48",
     "49"
