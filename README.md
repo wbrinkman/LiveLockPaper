@@ -7,7 +7,8 @@
 
 A GNOME Shell extension that lets you set any video as your lock screen background.
 
-> ⚠️ Only works on GNOME 47-49 so far. There are some issues with GNOME 46 and I'm trying my best to resolve them.
+> ⚠️ Works on **GNOME 47+**.  
+> If you are using **GNOME 46**, use the `experimental` branch (until it is merged into `main`).
 
 > 💡 If you experience issues, check the **Debug** section in preferences for workarounds.
 
@@ -70,7 +71,7 @@ A GNOME Shell extension that lets you set any video as your lock screen backgrou
 
 ## Requirements
 
-- GNOME Shell 47-49 (other versions untested)
+- GNOME Shell 47-50
 - GStreamer with good/bad plugins:
   ```bash
   # Fedora
