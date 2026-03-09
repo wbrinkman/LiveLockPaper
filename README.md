@@ -1,4 +1,11 @@
 <p align="center">
+  <img src="https://img.shields.io/github/stars/nick-redwill/LiveLockScreen">
+  <img src="https://img.shields.io/github/license/nick-redwill/LiveLockScreen">
+  <img src="https://img.shields.io/badge/GNOME%20Shell-47--50-blue">
+  <img src="https://img.shields.io/badge/status-active-success">
+</p>
+
+<p align="center">
   <img src="icon.png" width="128" height="128" alt="Live Lock Screen icon">
 </p>
 
