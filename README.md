@@ -56,8 +56,6 @@ A GNOME Shell extension that lets you set any video as your lock screen backgrou
 
 ## Installation
 
-## Installation
-
 ### Install from GNOME Extensions (recommended)
 
   <a href="https://extensions.gnome.org/extension/9419/live-lock-screen/">
