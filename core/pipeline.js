@@ -3,13 +3,26 @@ import GLib from 'gi://GLib';
 import GstController from 'gi://GstController';
 
 export default class Pipeline {
-    constructor({ videoPath, volume, loop, framerate, skipFrame, dataCallback }) {
+    constructor({ videoPath, volume, loop, framerate, skipFrame, dataCallback, onVideoEnd, targetWidth, targetHeight, timerPriority, preferHwDecoder, gpuColorConversion, name, timerDelay, adaptivePolling }) {
         this._videoPath = videoPath
         this._volume = volume
         this._loop = loop
         this._framerate = framerate
         this._dataCallback = dataCallback
         this._skipFrame = skipFrame ?? false
+        this._onVideoEnd = onVideoEnd || null
+        this._targetWidth = targetWidth || 0
+        this._targetHeight = targetHeight || 0
+        // Default for lock screen, idle for wallpaper.
+        this._timerPriority = timerPriority ?? GLib.PRIORITY_DEFAULT
+        this._preferHwDecoder = preferHwDecoder ?? false
+        this._gpuColorConversion = gpuColorConversion ?? false
+        // Human-readable name for log messages.
+        this._name = name || 'default'
+        // Optional start delay to stagger multiple pipelines.
+        this._timerDelay = timerDelay ?? 0
+        // Adaptive polling: quick re-poll on hit, normal interval on miss.
+        this._adaptivePolling = adaptivePolling ?? false
     
         this._pipeline = null;
         this._bus = null;
@@ -21,9 +34,15 @@ export default class Pipeline {
         
         this._initialized = false;
         this._firstFrame = true;
+        this._destroyed = false;
         
         this._dataTimeoutId = null; 
         this._playbackTimeoutId = null;
+
+        // Performance tracking
+        this._frameCount = 0;
+        this._droppedFrames = 0;
+        this._lastStatsTime = 0;
 
         this._PLAYBACK_FADE_DUR = 300;
     }
@@ -36,25 +55,113 @@ export default class Pipeline {
         if (this._initialized)
             return true;
 
-        try {
-            const videoBin   = new Gst.Bin({ name: 'video-bin' });
-            const videoConvert  = Gst.ElementFactory.make('videoconvert', 'videoconvert');
-            const videoSink  = Gst.ElementFactory.make('appsink', 'video-sink');
+        // Validate video path exists before building the pipeline
+        if (!this._videoPath || !GLib.file_test(this._videoPath, GLib.FileTest.EXISTS)) {
+            console.error(`[Pipeline:${this._name}] init: video file not found: ${this._videoPath}`);
+            return false;
+        }
 
-            if (!videoConvert || !videoSink) {
-                throw new Error('Failed to create video elements');
+        try {
+            // Prefer hardware decoders when requested.
+            if (this._preferHwDecoder) {
+                this._boostHwDecoderRanks();
             }
 
-            videoSink.set_property('caps', Gst.Caps.from_string('video/x-raw,format=BGRA'));
+            const videoBin   = new Gst.Bin({ name: 'video-bin' });
+            const videoSink  = Gst.ElementFactory.make('appsink', 'video-sink');
+
+            if (!videoSink) {
+                throw new Error('Failed to create appsink element');
+            }
+
+            // Apply target resolution caps when provided.
+            let capString = 'video/x-raw,format=BGRA';
+            if (this._targetWidth > 0 && this._targetHeight > 0) {
+                capString += `,width=${this._targetWidth},height=${this._targetHeight}`;
+            }
+
+            videoSink.set_property('caps', Gst.Caps.from_string(capString));
             videoSink.set_property('max-buffers', 1);
             videoSink.set_property('drop', true);
             videoSink.set_property('sync', true);
-            
-            videoBin.add(videoConvert);
-            videoBin.add(videoSink);
-            videoConvert.link(videoSink);
+            videoSink.set_property('emit-signals', false);
 
-            const videoGhostPad = Gst.GhostPad.new('sink', videoConvert.get_static_pad('sink'));
+            // Colour conversion path: GPU GL or CPU videoconvert.
+            let useGpuConversion = false;
+            let glUpload = null, glConvert = null, glDownload = null;
+            let videoConvert = null;
+
+            if (this._gpuColorConversion) {
+                glUpload   = Gst.ElementFactory.make('glupload',        'glupload');
+                glConvert  = Gst.ElementFactory.make('glcolorconvert',  'glcolorconvert');
+                glDownload = Gst.ElementFactory.make('gldownload',      'gldownload');
+
+                if (glUpload && glConvert && glDownload) {
+                    useGpuConversion = true;
+                    console.log(`[Pipeline:${this._name}] GPU colour conversion: ✓ (glupload → glcolorconvert → gldownload)`);
+                } else {
+                    console.log(`[Pipeline:${this._name}] GPU colour conversion: ✗ GL elements not available, falling back to CPU videoconvert`);
+                    glUpload = null; glConvert = null; glDownload = null;
+                }
+            }
+
+            if (!useGpuConversion) {
+                videoConvert = Gst.ElementFactory.make('videoconvert', 'videoconvert');
+                if (!videoConvert) {
+                    throw new Error('Failed to create videoconvert element');
+                }
+                // Cheap videoconvert settings when available.
+                try {
+                    videoConvert.set_property('dither', 0);           // No dithering (faster)
+                    videoConvert.set_property('chroma-mode', 0);      // No chroma resampling
+                } catch (e) { /* properties may not exist in older GStreamer */ }
+            }
+
+            // Queue between decoder output and conversion.
+            const preConvertQueue = Gst.ElementFactory.make('queue', 'pre-convert-queue');
+            if (preConvertQueue) {
+                preConvertQueue.set_property('max-size-buffers', 2);
+                preConvertQueue.set_property('max-size-time', 0);
+                preConvertQueue.set_property('max-size-bytes', 0);
+            }
+
+            // Optional scaler in-pipeline.
+            const videoScale = Gst.ElementFactory.make('videoscale', 'videoscale');
+
+            // Queue between conversion and sink side.
+            const postConvertQueue = Gst.ElementFactory.make('queue', 'post-convert-queue');
+            if (postConvertQueue) {
+                postConvertQueue.set_property('max-size-buffers', 2);
+                postConvertQueue.set_property('max-size-time', 0);
+                postConvertQueue.set_property('max-size-bytes', 0);
+            }
+
+            // Assemble the video bin chain.
+            const binElements = [];
+            if (preConvertQueue) binElements.push(preConvertQueue);
+            if (useGpuConversion) {
+                binElements.push(glUpload);
+                binElements.push(glConvert);
+                binElements.push(glDownload);
+            } else {
+                binElements.push(videoConvert);
+            }
+            if (postConvertQueue) binElements.push(postConvertQueue);
+            if (videoScale) {
+                try { videoScale.set_property('method', 1); } catch (e) {} // bilinear
+                binElements.push(videoScale);
+            }
+            binElements.push(videoSink);
+
+            for (const el of binElements) videoBin.add(el);
+            for (let i = 0; i < binElements.length - 1; i++) {
+                if (!binElements[i].link(binElements[i + 1])) {
+                    console.log(`[Pipeline:${this._name}] Warning: failed to link ${binElements[i].name} → ${binElements[i + 1].name}`);
+                }
+            }
+
+            const ghostTarget = binElements[0].get_static_pad('sink');
+            const videoGhostPad = Gst.GhostPad.new('sink', ghostTarget);
             videoBin.add_pad(videoGhostPad);
 
             let pipeline = Gst.ElementFactory.make('playbin', 'pipeline');
@@ -63,6 +170,28 @@ export default class Pipeline {
             }
             pipeline.set_property('uri', GLib.filename_to_uri(this._videoPath, null));
             pipeline.set_property('video-sink', videoBin);
+
+            // Keep playbin flags minimal.
+            let flags = 0x1 | 0x40; // VIDEO + NATIVE_VIDEO
+            if (this._volume > 0) flags |= 0x2; // AUDIO only when needed
+            try {
+                pipeline.set_property('flags', flags);
+            } catch (e) {
+                // Flags property may not be settable in all cases
+            }
+
+            // Add playbin video-filter queue when available.
+            try {
+                const videoFilter = Gst.ElementFactory.make('queue', 'playbin-video-filter');
+                if (videoFilter) {
+                    videoFilter.set_property('max-size-buffers', 2);
+                    videoFilter.set_property('max-size-time', 0);
+                    videoFilter.set_property('max-size-bytes', 0);
+                    pipeline.set_property('video-filter', videoFilter);
+                }
+            } catch (e) {
+                // video-filter property may not be available
+            }
 
             if (this._volume > 0) {
                 const audioBin      = new Gst.Bin({ name: 'audio-bin' });
@@ -77,7 +206,7 @@ export default class Pipeline {
                 }
 
                 audioQueue.set_property('max-size-buffers', 0); // unlimited
-                audioQueue.set_property('max-size-time', 5 * Gst.SECOND); // 2 second buffer
+                audioQueue.set_property('max-size-time', 5 * Gst.SECOND); // 5 second buffer
                 audioQueue.set_property('max-size-bytes', 0); // unlimited
 
                 audioSink.set_property('sync', true);
@@ -99,7 +228,6 @@ export default class Pipeline {
                     GstController.InterpolationMode.LINEAR
                 );
 
-                // Bind it to the volume property
                 const binding = GstController.DirectControlBinding.new(
                     volumeElement,
                     'volume',
@@ -109,7 +237,6 @@ export default class Pipeline {
                 volumeElement.add_control_binding(binding);
                 volumeElement.set_property('volume', this._volume)
 
-                // Save for later
                 this._volumeElement = volumeElement;
                 this._volumeControl = controlSource;
 
@@ -129,7 +256,34 @@ export default class Pipeline {
             this._initBusWatch();
 
             const interval = 1000 / this._framerate;
-            this._dataTimeoutId = this._startFetchTimer(interval)
+            this._interval = interval;
+            const scaleInfo = (this._targetWidth > 0 && this._targetHeight > 0)
+                ? `, target: ${this._targetWidth}x${this._targetHeight}`
+                : '';
+            const prioLabel = this._timerPriority === GLib.PRIORITY_DEFAULT ? 'normal' : 'idle';
+            const hwLabel = this._preferHwDecoder ? '✓' : '✗';
+            const gpuLabel = useGpuConversion ? '✓' : '✗';
+            const staggerInfo = this._timerDelay > 0 ? `, stagger: ${this._timerDelay}ms` : '';
+            const deliveryLabel = this._adaptivePolling ? 'adaptive' : 'fixed';
+            console.log(`[Pipeline:${this._name}] Initialized: ${this._framerate} fps (${interval.toFixed(1)}ms${scaleInfo}${staggerInfo}), polling: ${deliveryLabel}, priority: ${prioLabel}, hwdec: ${hwLabel}, gpu-cc: ${gpuLabel}`);
+            this._lastStatsTime = GLib.get_monotonic_time();
+
+            // Stagger timer start when requested.
+            if (this._timerDelay > 0) {
+                this._dataTimeoutId = GLib.timeout_add(this._timerPriority, this._timerDelay, () => {
+                    console.log(`[Pipeline:${this._name}] Stagger delay elapsed, starting frame timer`);
+                    if (this._adaptivePolling) {
+                        this._scheduleAdaptivePoll(interval);
+                    } else {
+                        this._dataTimeoutId = this._startFetchTimer(interval);
+                    }
+                    return GLib.SOURCE_REMOVE;
+                });
+            } else if (this._adaptivePolling) {
+                this._scheduleAdaptivePoll(interval);
+            } else {
+                this._dataTimeoutId = this._startFetchTimer(interval);
+            }
             if (!this._dataTimeoutId) {
                 throw new Error('Failed to create the fetch timer')
             }
@@ -144,23 +298,71 @@ export default class Pipeline {
         }
     }
 
+    // Raise hardware decoder ranks over software decoders.
+    _boostHwDecoderRanks() {
+        const hwDecoders = [
+            // GStreamer VA (modern, preferred)
+            'vah264dec', 'vah265dec', 'vavp9dec', 'vaav1dec',
+            'vajpegdec', 'vampeg2dec',
+            // GStreamer VAAPI (legacy)
+            'vaapidecodebin', 'vaapih264dec', 'vaapih265dec', 'vaapivp9dec',
+            // NVIDIA NVDEC
+            'nvh264dec', 'nvh265dec', 'nvvp9dec', 'nvav1dec',
+            'nvh264sldec', 'nvh265sldec',
+        ];
+        const boosted = [];
+        const targetRank = Gst.Rank.PRIMARY + 256;
+        for (const name of hwDecoders) {
+            const factory = Gst.ElementFactory.find(name);
+            if (factory) {
+                const oldRank = factory.get_rank();
+                if (oldRank < targetRank) {
+                    factory.set_rank(targetRank);
+                    boosted.push(`${name} (${oldRank}→${targetRank})`);
+                } else {
+                    boosted.push(`${name} (already ${oldRank})`);
+                }
+            }
+        }
+        if (boosted.length > 0) {
+            console.log(`[Pipeline:${this._name}] HW decoder ranks boosted: ${boosted.join(', ')}`);
+        } else {
+            console.log(`[Pipeline:${this._name}] No hardware decoders found on this system`);
+        }
+    }
+
     _initBusWatch() {
         this._bus.add_watch(GLib.PRIORITY_DEFAULT, (bus, message) => {
-            // When stream reaches its end -> seek back to 0
-            if (this._loop && message.type === Gst.MessageType.EOS) {
-                this._pipeline.seek_simple(
-                    Gst.Format.TIME,
-                    Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
-                    0
-                );
-                this._firstFrame = true;
+            if (message.type === Gst.MessageType.EOS) {
+                if (this._loop) {
+                    this._pipeline.seek_simple(
+                        Gst.Format.TIME,
+                        Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                        0
+                    );
+                    this._firstFrame = true;
+                } else if (this._onVideoEnd) {
+                    this._onVideoEnd();
+                }
             }
             return GLib.SOURCE_CONTINUE;
         });
     }
+    
 
     _startFetchTimer(interval) {
-        return GLib.timeout_add(GLib.PRIORITY_DEFAULT_IDLE, interval, () => this._fetchData());
+        return GLib.timeout_add(this._timerPriority, interval, () => this._fetchData());
+    }
+
+    // Adaptive polling: fast after hit, normal after miss.
+    _scheduleAdaptivePoll(delayMs) {
+        if (this._destroyed) return;
+        this._dataTimeoutId = GLib.timeout_add(this._timerPriority, delayMs, () => {
+            if (this._destroyed) return GLib.SOURCE_REMOVE;
+            const gotFrame = this._fetchDataAdaptive();
+            this._scheduleAdaptivePoll(gotFrame ? 1 : this._interval);
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _easeVolume(target, durationMs = 300) {
@@ -188,52 +390,74 @@ export default class Pipeline {
         const safeStart = Math.max(0.0, Math.min(1.0, startVol));
         const safeTarget = Math.max(0.0, Math.min(1.0, target));
 
-        // HACK: 
-        // I have no idea why it requires me to divide the value by 10
-        // But that seems to fix the issue
+        // Keep legacy scaling to match existing pipeline volume behavior.
         this._volumeControl.set(startTime, safeStart / 10);
         this._volumeControl.set(endTime, safeTarget / 10);
     }
 
+    // Pull one frame in fixed-interval mode.
     _fetchData() {
-        let sample = this._videoSink.emit('try-pull-sample', 0);
-        if (!sample) return GLib.SOURCE_CONTINUE;
+        this._pullAndProcess();
+        return GLib.SOURCE_CONTINUE;
+    }
 
-        let buffer = sample.get_buffer();
-        
-        // HACK:
-        // Skipping first frame because it is a green screen sometimes
-        if (this._skipFrame && this._firstFrame) {
-            this._firstFrame = false;
-            buffer = null;
-            sample = null;
-            return GLib.SOURCE_CONTINUE;
-        }
+    // Pull one frame in adaptive mode.
+    _fetchDataAdaptive() {
+        return this._pullAndProcess();
+    }
 
-        let caps = sample.get_caps();
-        let structure = caps.get_structure(0);
-        let [, width] = structure.get_int('width');
-        let [, height] = structure.get_int('height');
+    // Shared frame pull path used by fixed and adaptive timers.
+    _pullAndProcess() {
+        try {
+            if (this._destroyed || !this._videoSink) return false;
 
-        let [success, mapInfo] = buffer.map(Gst.MapFlags.READ);
-        if (!success) return GLib.SOURCE_CONTINUE;
+            let sample = this._videoSink.emit('try-pull-sample', 0);
+            if (!sample) {
+                this._droppedFrames++;
+                this._logStats();
+                return false;
+            }
 
-        // Using non-blocking call
-        GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+            let buffer = sample.get_buffer();
+            
+            // Some files decode a bad first frame.
+            if (this._skipFrame && this._firstFrame) {
+                this._firstFrame = false;
+                return false;
+            }
+
+            let caps = sample.get_caps();
+            let structure = caps.get_structure(0);
+            let [, width] = structure.get_int('width');
+            let [, height] = structure.get_int('height');
+
+            let [success, mapInfo] = buffer.map(Gst.MapFlags.READ);
+            if (!success) return false;
+
             this._dataCallback(mapInfo.data, width, height);
             buffer.unmap(mapInfo);
-            
-            // Explicitly null everything to help GC
-            mapInfo = null;
-            buffer = null;
-            caps = null;
-            structure = null;
-            sample = null;
 
-            return GLib.SOURCE_REMOVE; 
-        });
+            this._frameCount++;
+            this._logStats();
+            return true;
+        } catch (e) {
+            console.error(`[Pipeline:${this._name}] Error in frame processing: ${e.message}`);
+            return false;
+        }
+    }
 
-        return GLib.SOURCE_CONTINUE;
+    // Log performance stats every 5 seconds.
+    _logStats() {
+        const now = GLib.get_monotonic_time();
+        const elapsed = (now - this._lastStatsTime) / 1000000; // microseconds → seconds
+        if (elapsed >= 5.0) {
+            const actualFps = this._frameCount / elapsed;
+            const mode = this._adaptivePolling ? 'adaptive' : 'fixed';
+            console.log(`[Pipeline:${this._name}] Stats: ${actualFps.toFixed(1)} fps (target: ${this._framerate}), ${this._droppedFrames} empty in ${elapsed.toFixed(0)}s [${mode}]`);
+            this._frameCount = 0;
+            this._droppedFrames = 0;
+            this._lastStatsTime = now;
+        }
     }
 
     play() {
@@ -266,11 +490,41 @@ export default class Pipeline {
         }
     }
 
+    changeVideo(newVideoPath, newFramerate = null) {
+    // Skip invalid path changes.
+        if (!newVideoPath || !GLib.file_test(newVideoPath, GLib.FileTest.EXISTS)) {
+            console.log(`[Pipeline:${this._name}] changeVideo: file not found, skipping: ${newVideoPath}`);
+            return;
+        }
+
+        // Destroy current pipeline
+        this.destroy();
+        
+        // Update video path
+        this._videoPath = newVideoPath;
+        this._firstFrame = true;
+        this._initialized = false;
+        this._destroyed = false;
+        
+        // Update framerate if provided
+        if (newFramerate !== null) {
+            const oldFramerate = this._framerate;
+            this._framerate = newFramerate;
+            console.log(`[Pipeline:${this._name}] Framerate changed: ${oldFramerate} -> ${newFramerate} fps`);
+        }
+        
+        // Reinitialize with new video
+        if (this.init()) {
+            this.play();
+        }
+    }
+
     destroy() {
+        this._destroyed = true;
         this._clearPlaybackTimeout()
 
         if (this._dataTimeoutId) {
-            GLib.Source.remove(this._dataTimeoutId);
+            try { GLib.Source.remove(this._dataTimeoutId); } catch (e) { }
             this._dataTimeoutId = null;
         }
         if (this._bus) {
@@ -283,5 +537,7 @@ export default class Pipeline {
         }
 
         this._videoSink = null;
+        this._frameCount = 0;
+        this._droppedFrames = 0;
     }
 }
