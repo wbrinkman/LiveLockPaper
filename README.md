@@ -99,9 +99,17 @@ These defaults are aimed at sensible behavior out of the box:
    git clone https://github.com/DeLuca21/LiveLockPaper.git
    ```
 
-2. Copy to your GNOME Shell extensions folder:
+2. Install into your GNOME Shell extensions folder:
    ```bash
    cp -r LiveLockPaper ~/.local/share/gnome-shell/extensions/live-lockpaper@DeLuca21
+   ```
+   Or move it instead of copying:
+   ```bash
+   mv LiveLockPaper ~/.local/share/gnome-shell/extensions/live-lockpaper@DeLuca21
+   ```
+   If you used `cp` and no longer need the clone directory:
+   ```bash
+   rm -rf LiveLockPaper
    ```
 
 3. Log out and back in (or restart GNOME Shell), then enable:
