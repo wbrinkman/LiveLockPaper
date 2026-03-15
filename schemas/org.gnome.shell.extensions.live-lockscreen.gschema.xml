@@ -1,8 +1,21 @@
 <schemalist>
-    <schema id="org.gnome.shell.extensions.live-lockscreen" path="/org/gnome/shell/extensions/live-lockscreen/">
+    <schema id="org.gnome.shell.extensions.live-lockpaper-deluca21" path="/org/gnome/shell/extensions/live-lockpaper-deluca21/">
         <key name="background-video-path" type="s">
             <default>""</default>
             <summary>Path to background video</summary>
+        </key>
+        <key name="lockscreen-enabled" type="b">
+            <default>true</default>
+            <summary>Enable video lock screen</summary>
+            <description>When enabled, Live LockPaper renders video on the lock screen. Disable to keep the default static lock screen while still allowing desktop video wallpaper.</description>
+        </key>
+        <key name="background-video-paths" type="as">
+            <default>[]</default>
+            <summary>Paths to background videos (for random selection)</summary>
+        </key>
+        <key name="background-video-random-order" type="b">
+            <default>true</default>
+            <summary>Play videos in random order</summary>
         </key>
         <key name="background-video-scaling-mode" type="i">
             <range min="0" max="2" />
@@ -24,6 +37,38 @@
             <default>25</default>
             <summary>Background video framerate</summary>
         </key>
+        <key name="background-video-auto-fps" type="b">
+            <default>true</default>
+            <summary>Automatically detect and use video FPS</summary>
+        </key>
+        <key name="background-video-metadata" type="a{sv}">
+            <default>{}</default>
+            <summary>Video metadata (FPS, resolution, duration) stored as path -> {fps: int, width: int, height: int, duration: i, playCount: i}</summary>
+        </key>
+        <key name="background-video-transition-type" type="i">
+            <range min="0" max="8" />
+            <default>0</default>
+            <summary>Video transition type (0=none, 1=fade, 2=crossfade, 3=slide left, 4=slide right, 5=slide up, 6=slide down, 7=zoom in, 8=zoom out)</summary>
+        </key>
+        <key name="background-video-transition-duration" type="i">
+            <range min="0" max="5000" />
+            <default>500</default>
+            <summary>Video transition duration in milliseconds</summary>
+        </key>
+        <key name="background-video-playback-speed" type="d">
+            <range min="0.25" max="4.0" />
+            <default>1.0</default>
+            <summary>Video playback speed multiplier</summary>
+        </key>
+        <key name="background-video-start-position" type="i">
+            <range min="0" max="3600000" />
+            <default>0</default>
+            <summary>Video start position in seconds (0 = start from beginning, -1 = resume from last position)</summary>
+        </key>
+        <key name="background-video-last-positions" type="a{sv}">
+            <default>{}</default>
+            <summary>Last playback positions for videos (path -> position in seconds)</summary>
+        </key>
         <key name="background-video-looped" type="b">
             <default>true</default>
             <summary>Is background video looped</summary>
@@ -44,7 +89,7 @@
             <summary>Whether to pause the video on password prompt</summary>
         </key>
         <key name="prompt-change-blur" type="b">
-            <default>false</default>
+            <default>true</default>
             <summary>Whether to change the blur value on password prompt</summary>
         </key>
         
@@ -63,10 +108,140 @@
             <default>300</default>
             <summary>Background video blur change animation duration</summary>
         </key>
+        <key name="prompt-grayscale" type="b">
+            <default>false</default>
+            <summary>Grayscale effect on password prompt</summary>
+            <description>Apply a desaturation (grayscale) effect to the lock screen video when the password prompt appears. Provides a subtle visual cue that the prompt is active.</description>
+        </key>
+
+        <key name="general-disable-on-battery" type="b">
+            <default>false</default>
+            <summary>Disable on battery power</summary>
+            <description>Automatically disable video wallpaper when the device is running on battery power. Helps conserve battery life on laptops.</description>
+        </key>
+
+        <key name="background-video-per-monitor" type="b">
+            <default>false</default>
+            <summary>Use different videos per monitor on lock screen</summary>
+            <description>When enabled, each monitor can have its own set of videos on the lock screen</description>
+        </key>
+        <key name="background-video-per-monitor-config" type="s">
+            <default>"{}"</default>
+            <summary>Per-monitor lock screen video configuration</summary>
+            <description>JSON object mapping monitor connector names to arrays of video paths. Example: {"DP-1": ["/path/a.mp4"], "HDMI-1": ["/path/b.mp4"]}</description>
+        </key>
+
         <key name="debug-skip-frame" type="b">
             <default>false</default>
             <summary>Whether to skip the first frame of video or not</summary>
             <description>Sometimes the very first frame of the video might be completely green, so there is an option to skip it</description>
+        </key>
+        <key name="debug-prefer-hardware-decoder" type="b">
+            <default>false</default>
+            <summary>Prefer hardware video decoder</summary>
+            <description>When enabled, prioritises VA-API and NVDEC hardware decoders over software decoders. Reduces CPU usage significantly but may not work on all systems.</description>
+        </key>
+        <key name="debug-gpu-color-conversion" type="b">
+            <default>false</default>
+            <summary>GPU colour conversion</summary>
+            <description>Use OpenGL for YUV→BGRA colour conversion instead of CPU. Can significantly reduce CPU usage on systems with good GPU drivers. Requires GStreamer GL plugins.</description>
+        </key>
+        <key name="debug-pause-when-hidden" type="b">
+            <default>true</default>
+            <summary>Pause wallpaper when desktop is hidden</summary>
+            <description>Automatically pause wallpaper video playback when all monitors are fully covered by maximised or fullscreen windows. Saves CPU/GPU when the wallpaper is not visible.</description>
+        </key>
+        <key name="debug-push-frame-delivery" type="b">
+            <default>false</default>
+            <summary>Adaptive frame polling</summary>
+            <description>Replaces the fixed-interval polling timer with an adaptive scheduler. When a frame is available it re-polls immediately; when the decoder has no frame ready it backs off to the normal interval. Reduces empty polls and can lower CPU usage.</description>
+        </key>
+        <key name="debug-use-gtk4-sink" type="b">
+            <default>false</default>
+            <summary>Force legacy appsink renderer</summary>
+            <description>When false (default), use the external GTK4 subprocess with gtk4paintablesink for better performance. When true, force the old in-process appsink renderer for compatibility testing. Falls back to appsink automatically if gtk4paintablesink is not available.</description>
+        </key>
+        <key name="debug-gtk-helper-logs" type="b">
+            <default>false</default>
+            <summary>Enable verbose GTK helper window logging</summary>
+            <description>When enabled, logs detailed helper window hint state (taskbar/pager/monitor/type/fullscreen/maximized) during GTK4 wallpaper lock/unlock flows. Keep disabled for normal use to reduce journal noise.</description>
+        </key>
+        <key name="debug-show-panel-button" type="b">
+            <default>true</default>
+            <summary>Show top bar controls button</summary>
+            <description>Shows the Live LockPaper quick-controls button in the top bar with play/pause, next video, and quick toggles. Disable to hide the panel button.</description>
+        </key>
+
+        <!-- Wallpaper settings -->
+        <key name="wallpaper-enabled" type="b">
+            <default>false</default>
+            <summary>Enable video wallpaper on the desktop</summary>
+        </key>
+        <key name="wallpaper-video-paths" type="as">
+            <default>[]</default>
+            <summary>Video paths for desktop wallpaper</summary>
+        </key>
+        <key name="wallpaper-random-order" type="b">
+            <default>true</default>
+            <summary>Play wallpaper videos in random order</summary>
+        </key>
+        <key name="wallpaper-auto-fps" type="b">
+            <default>true</default>
+            <summary>Auto-detect FPS for wallpaper videos</summary>
+        </key>
+        <key name="wallpaper-framerate" type="i">
+            <range min="1" max="120" />
+            <default>25</default>
+            <summary>Wallpaper video framerate</summary>
+        </key>
+        <key name="wallpaper-scaling-mode" type="i">
+            <range min="0" max="2" />
+            <default>0</default>
+            <summary>Wallpaper video scaling mode</summary>
+        </key>
+        <key name="wallpaper-blur-radius" type="i">
+            <range min="0" max="100" />
+            <default>0</default>
+            <summary>Wallpaper video blur radius</summary>
+        </key>
+        <key name="wallpaper-blur-brightness" type="d">
+            <range min="0" max="1" />
+            <default>0.65</default>
+            <summary>Wallpaper video blur brightness</summary>
+        </key>
+        <key name="wallpaper-looped" type="b">
+            <default>true</default>
+            <summary>Loop wallpaper videos</summary>
+        </key>
+        <key name="wallpaper-volume" type="i">
+            <range min="0" max="100" />
+            <default>0</default>
+            <summary>Wallpaper audio volume</summary>
+        </key>
+        <key name="wallpaper-fade-in-duration" type="i">
+            <range min="0" max="600000" />
+            <default>500</default>
+            <summary>Wallpaper fade-in duration in ms</summary>
+        </key>
+        <key name="wallpaper-per-monitor" type="b">
+            <default>true</default>
+            <summary>Use different videos per monitor</summary>
+            <description>When enabled, each monitor can have its own set of videos configured independently</description>
+        </key>
+        <key name="wallpaper-per-monitor-config" type="s">
+            <default>"{}"</default>
+            <summary>Per-monitor video configuration</summary>
+            <description>JSON object mapping monitor connector names to arrays of video paths. Example: {"DP-1": ["/path/a.mp4"], "HDMI-1": ["/path/b.mp4"]}</description>
+        </key>
+        <key name="wallpaper-video-metadata" type="a{sv}">
+            <default>{}</default>
+            <summary>Wallpaper video metadata</summary>
+        </key>
+        <key name="wallpaper-quality" type="i">
+            <range min="25" max="100" />
+            <default>90</default>
+            <summary>Wallpaper render quality (percentage of monitor resolution)</summary>
+            <description>Lower values reduce GPU/CPU load but may look blurrier. 100 = native resolution, 75 = good balance, 50 = performance mode.</description>
         </key>
     </schema>
 </schemalist>
