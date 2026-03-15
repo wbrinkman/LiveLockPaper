@@ -1,17 +1,18 @@
 {
-  "description": "A GNOME Shell extension that lets you set any video as your lock screen background.",
-  "name": "Live Lock Screen",
+  "description": "A GNOME Shell extension that lets you set any video as your lock screen and desktop wallpaper.",
+  "name": "Live LockPaper",
   "session-modes": [
+    "user",
     "unlock-dialog"
   ],
-  "settings-schema": "org.gnome.shell.extensions.live-lockscreen",
+  "settings-schema": "org.gnome.shell.extensions.live-lockpaper-deluca21",
   "shell-version": [
     "47",
     "48",
     "49",
     "50"
   ],
-  "url": "https://github.com/nick-redwill/LiveLockScreen",
-  "uuid": "live-lockscreen@nick-redwill",
-  "version": 2
+  "url": "https://github.com/DeLuca21/LiveLockPaper",
+  "uuid": "live-lockpaper@DeLuca21",
+  "version": 1
 }
