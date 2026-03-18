@@ -170,7 +170,7 @@ export default class Pipeline {
             }
             pipeline.set_property('uri', GLib.filename_to_uri(this._videoPath, null));
             pipeline.set_property('video-sink', videoBin);
-
+            
             // Keep playbin flags minimal.
             let flags = 0x1 | 0x40; // VIDEO + NATIVE_VIDEO
             if (this._volume > 0) flags |= 0x2; // AUDIO only when needed
@@ -411,32 +411,32 @@ export default class Pipeline {
         try {
             if (this._destroyed || !this._videoSink) return false;
 
-            let sample = this._videoSink.emit('try-pull-sample', 0);
+        let sample = this._videoSink.emit('try-pull-sample', 0);
             if (!sample) {
                 this._droppedFrames++;
                 this._logStats();
                 return false;
             }
 
-            let buffer = sample.get_buffer();
-            
+        let buffer = sample.get_buffer();
+        
             // Some files decode a bad first frame.
-            if (this._skipFrame && this._firstFrame) {
-                this._firstFrame = false;
+        if (this._skipFrame && this._firstFrame) {
+            this._firstFrame = false;
                 return false;
-            }
+        }
 
-            let caps = sample.get_caps();
-            let structure = caps.get_structure(0);
-            let [, width] = structure.get_int('width');
-            let [, height] = structure.get_int('height');
+        let caps = sample.get_caps();
+        let structure = caps.get_structure(0);
+        let [, width] = structure.get_int('width');
+        let [, height] = structure.get_int('height');
 
-            let [success, mapInfo] = buffer.map(Gst.MapFlags.READ);
+        let [success, mapInfo] = buffer.map(Gst.MapFlags.READ);
             if (!success) return false;
 
             this._dataCallback(mapInfo.data, width, height);
             buffer.unmap(mapInfo);
-
+            
             this._frameCount++;
             this._logStats();
             return true;

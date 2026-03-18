@@ -18,7 +18,8 @@ export default class Player {
 
     run() {
         this._app = new Gtk.Application({
-            flags: Gio.ApplicationFlags.FLAGS_NONE,
+            application_id: 'dev.livelockpaper.wallpaper.helper',
+            flags: Gio.ApplicationFlags.NON_UNIQUE,
         });
         this._app.connect('activate', () => this._activate());
 
@@ -105,6 +106,13 @@ export default class Player {
             for (let i = 0; i < monitorCount; i++) {
                 const monitorConfig = monitors[i] || monitors[0];
                 const videos = Array.isArray(monitorConfig?.videos) ? monitorConfig.videos : [];
+                
+                // Skip monitors with no videos (disabled monitors)
+                if (videos.length === 0) {
+                    console.log(`[Player] Skipping monitor ${i} - no videos configured`);
+                    continue;
+                }
+                
                 const gdkMonitor = gdkMonitors.get_item(i);
                 const geo = gdkMonitor?.get_geometry();
                 const baseW = monitorConfig?.width || geo?.width || 1920;
@@ -209,36 +217,27 @@ export default class Player {
         });
         try { window.set_application(this._app); } catch (_) {}
 
-        // Size window to cover the monitor (no make_fullscreen needed)
         if (geo) {
             window.set_default_size(geo.width, geo.height);
-            try { window.set_size_request(geo.width, geo.height); } catch (_) {}
+            window.set_size_request(geo.width, geo.height);
         }
 
         const picture = new Gtk.Picture({
             paintable,
             content_fit: scaling,
-            can_shrink: false,
+            can_shrink: true,
             hexpand: true,
             vexpand: true,
         });
         if (geo) {
-            try { picture.set_size_request(geo.width, geo.height); } catch (_) {}
+            picture.set_size_request(geo.width, geo.height);
         }
         try { picture.set_can_target(false); } catch (_) {}
 
         window.set_child(picture);
         window.set_decorated(false);
-        // Keep helper windows resizable so Mutter can apply monitor-frame
-        // move_resize_frame requests from the extension without rejection.
         window.set_resizable(true);
         try { window.set_modal(false); } catch (_) {}
-        // Prefer UTILITY so desktop-related shell components (e.g. docks) do not
-        // treat helper surfaces as desktop windows on secondary monitors.
-        // Avoid DESKTOP fallback because that can hide/alter dock behavior.
-        try { window.set_type_hint(Gdk.WindowTypeHint.UTILITY); } catch (_) {
-            try { window.set_type_hint(Gdk.WindowTypeHint.DIALOG); } catch (_) {}
-        }
         try { window.set_startup_id(''); } catch (_) {}
         try { window.set_can_target(false); } catch (_) {}
         try { window.set_focusable(false); } catch (_) {}
@@ -246,8 +245,6 @@ export default class Player {
         window.connect('realize', () => {
             const surface = window.get_surface();
             surface?.set_opaque_region(null);
-            // Make helper window click-through so desktop context menu can work.
-            // On some compositors this is ignored for xdg_toplevel surfaces.
             try {
                 const inputRegion = new cairo.Region();
                 surface?.set_input_region(inputRegion);
