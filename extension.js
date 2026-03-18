@@ -18,7 +18,7 @@ import Meta from 'gi://Meta';
 import Pipeline from './core/pipeline.js';
 import { PlayerProcess } from './core/player_process.js';
 
-import { Keys } from "./enums.js";
+import { Keys, PauseWhenHiddenMode } from "./enums.js";
 import { setImageData } from './utils/set_image_data.js';
 import { isGtk4PaintableSinkAvailable } from './utils/check_dependencies.js';
 import { sendErrorNotification } from './utils/notifications.js';
@@ -121,8 +121,7 @@ export default class LockscreenExtension extends Extension {
             this._deferredTeardownId = null;
         }
 
-        // Defer actual teardown — if enable() is called within 350ms (i.e.
-        // this was just a mode-transition cycle), the teardown is cancelled.
+        // Defer teardown — if enable() is called within 350ms, cancel teardown
         this._deferredTeardownId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 350, () => {
             this._deferredTeardownId = null;
             if (this._active) return GLib.SOURCE_REMOVE; // re-enabled, skip
@@ -140,6 +139,7 @@ export default class LockscreenExtension extends Extension {
                 GLib.Source.remove(this._deferredActivateId);
                 this._deferredActivateId = null;
             }
+            console.log('[LiveLockPaper] diagnostics build active: snapshot-v1');
 
             if (!Gst.is_initialized()) {
                 console.log('[LiveLockPaper] Initializing GStreamer…');
@@ -375,25 +375,31 @@ export default class LockscreenExtension extends Extension {
         this._manualWallpaperPaused = false;
 
         this._panelButton = new PanelMenu.Button(0.0, 'LiveLockPaper');
-        const panelGicon = Gio.icon_new_for_string(`${this.path}/icon.png`);
-        const icon = new St.Icon({
-            gicon: panelGicon,
+        // Use standard icon that should work with most icon packs
+        this._panelIcon = new St.Icon({
+            icon_name: 'preferences-desktop-wallpaper-symbolic',
             fallback_icon_name: 'image-x-generic-symbolic',
             style_class: 'system-status-icon',
         });
-        this._panelButton.add_child(icon);
+        this._panelButton.add_child(this._panelIcon);
 
         this._menuPlayPauseItem = new PopupMenu.PopupMenuItem('Pause Wallpaper');
         this._menuPlayPauseId = this._menuPlayPauseItem.connect('activate', () => {
             this._toggleWallpaperPlaybackFromMenu();
+            return false; // Prevent menu from closing
         });
         this._panelButton.menu.addMenuItem(this._menuPlayPauseItem);
 
         this._menuNextItem = new PopupMenu.PopupMenuItem('Next Video');
         this._menuNextId = this._menuNextItem.connect('activate', () => {
             this._advanceWallpaperFromMenu();
+            return false; // Prevent menu from closing
         });
         this._panelButton.menu.addMenuItem(this._menuNextItem);
+
+        // Wallpaper group (submenu)
+        this._menuWallpaperGroup = new PopupMenu.PopupSubMenuMenuItem('Wallpaper', true);
+        const wallpaperSubmenu = this._menuWallpaperGroup.menu;
 
         this._menuWallpaperEnabledSwitch = new PopupMenu.PopupSwitchMenuItem(
             'Wallpaper enabled',
@@ -402,26 +408,7 @@ export default class LockscreenExtension extends Extension {
         this._menuWallpaperEnabledId = this._menuWallpaperEnabledSwitch.connect('toggled', (_item, state) => {
             this._settings.set_boolean(Keys.WALLPAPER_ENABLED, state);
         });
-        this._panelButton.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this._panelButton.menu.addMenuItem(this._menuWallpaperEnabledSwitch);
-
-        this._menuLockscreenEnabledSwitch = new PopupMenu.PopupSwitchMenuItem(
-            'Lock screen video',
-            this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED)
-        );
-        this._menuLockscreenEnabledId = this._menuLockscreenEnabledSwitch.connect('toggled', (_item, state) => {
-            this._settings.set_boolean(Keys.LOCKSCREEN_ENABLED, state);
-        });
-        this._panelButton.menu.addMenuItem(this._menuLockscreenEnabledSwitch);
-
-        this._menuPauseWhenHiddenSwitch = new PopupMenu.PopupSwitchMenuItem(
-            'Pause when hidden',
-            this._settings.get_boolean(Keys.DEBUG_PAUSE_WHEN_HIDDEN)
-        );
-        this._menuPauseWhenHiddenId = this._menuPauseWhenHiddenSwitch.connect('toggled', (_item, state) => {
-            this._settings.set_boolean(Keys.DEBUG_PAUSE_WHEN_HIDDEN, state);
-        });
-        
+        wallpaperSubmenu.addMenuItem(this._menuWallpaperEnabledSwitch);
 
         this._menuRandomOrderSwitch = new PopupMenu.PopupSwitchMenuItem(
             'Random order',
@@ -430,7 +417,7 @@ export default class LockscreenExtension extends Extension {
         this._menuRandomOrderId = this._menuRandomOrderSwitch.connect('toggled', (_item, state) => {
             this._settings.set_boolean(Keys.WALLPAPER_RANDOM_ORDER, state);
         });
-        
+        wallpaperSubmenu.addMenuItem(this._menuRandomOrderSwitch);
 
         this._menuPerMonitorSwitch = new PopupMenu.PopupSwitchMenuItem(
             'Per-monitor videos',
@@ -439,26 +426,29 @@ export default class LockscreenExtension extends Extension {
         this._menuPerMonitorId = this._menuPerMonitorSwitch.connect('toggled', (_item, state) => {
             this._settings.set_boolean(Keys.WALLPAPER_PER_MONITOR, state);
         });
-        
+        wallpaperSubmenu.addMenuItem(this._menuPerMonitorSwitch);
 
-        this._menuWallpaperBlurSwitch = new PopupMenu.PopupSwitchMenuItem(
-            'Wallpaper blur',
-            (this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS) ?? 0) > 0
-        );
-        this._menuWallpaperBlurId = this._menuWallpaperBlurSwitch.connect('toggled', (_item, state) => {
-            const current = this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS);
-            if (!state) {
-                if (current > 0)
-                    this._panelBlurRestoreRadius = current;
-                this._settings.set_int(Keys.WALLPAPER_BLUR_RADIUS, 0);
-                return;
+        // Pause when hidden - use a cycling menu item instead of submenu
+        // This avoids nested submenu issues
+        this._menuPauseWhenHiddenItem = new PopupMenu.PopupMenuItem('');
+        this._updatePauseWhenHiddenMenuLabel();
+        this._menuPauseWhenHiddenItem.connect('activate', () => {
+            const currentMode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
+            // Cycle through modes: OFF -> ALL_MONITORS -> ANY_MONITOR -> OFF
+            let nextMode;
+            if (currentMode === PauseWhenHiddenMode.OFF) {
+                nextMode = PauseWhenHiddenMode.ALL_MONITORS;
+            } else if (currentMode === PauseWhenHiddenMode.ALL_MONITORS) {
+                nextMode = PauseWhenHiddenMode.ANY_MONITOR;
+            } else {
+                nextMode = PauseWhenHiddenMode.OFF;
             }
-            const restore = this._panelBlurRestoreRadius && this._panelBlurRestoreRadius > 0
-                ? this._panelBlurRestoreRadius
-                : 20;
-            this._settings.set_int(Keys.WALLPAPER_BLUR_RADIUS, restore);
+            this._settings.set_int(Keys.PAUSE_WHEN_HIDDEN_MODE, nextMode);
+            this._updatePauseWhenHiddenMenuLabel();
+            this._updatePauseWhenHiddenMenuState();
+            return false; // Prevent menu from closing
         });
-        
+        wallpaperSubmenu.addMenuItem(this._menuPauseWhenHiddenItem);
 
         this._menuMuteSwitch = new PopupMenu.PopupSwitchMenuItem(
             'Mute wallpaper audio',
@@ -477,7 +467,133 @@ export default class LockscreenExtension extends Extension {
                 : 15;
             this._settings.set_int(Keys.WALLPAPER_VOLUME, restore);
         });
-        
+        wallpaperSubmenu.addMenuItem(this._menuMuteSwitch);
+
+        this._menuWallpaperBlurSwitch = new PopupMenu.PopupSwitchMenuItem(
+            'Wallpaper blur',
+            (this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS) ?? 0) > 0
+        );
+        this._menuWallpaperBlurId = this._menuWallpaperBlurSwitch.connect('toggled', (_item, state) => {
+            const current = this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS);
+            if (!state) {
+                if (current > 0)
+                    this._panelBlurRestoreRadius = current;
+                this._settings.set_int(Keys.WALLPAPER_BLUR_RADIUS, 0);
+                return;
+            }
+            const restore = this._panelBlurRestoreRadius && this._panelBlurRestoreRadius > 0
+                ? this._panelBlurRestoreRadius
+                : 20;
+            this._settings.set_int(Keys.WALLPAPER_BLUR_RADIUS, restore);
+        });
+        wallpaperSubmenu.addMenuItem(this._menuWallpaperBlurSwitch);
+
+        if (this._hasBatteryDevice()) {
+            this._menuWallpaperDisableOnBatterySwitch = new PopupMenu.PopupSwitchMenuItem(
+                'Disable on battery',
+                this._settings.get_boolean(Keys.WALLPAPER_DISABLE_ON_BATTERY)
+            );
+            this._menuWallpaperDisableOnBatteryId = this._menuWallpaperDisableOnBatterySwitch.connect('toggled', (_item, state) => {
+                this._settings.set_boolean(Keys.WALLPAPER_DISABLE_ON_BATTERY, state);
+            });
+            wallpaperSubmenu.addMenuItem(this._menuWallpaperDisableOnBatterySwitch);
+        }
+
+        this._panelButton.menu.addMenuItem(this._menuWallpaperGroup);
+
+        // Lock screen group (submenu)
+        this._menuLockscreenGroup = new PopupMenu.PopupSubMenuMenuItem('Lock screen', true);
+        const lockscreenSubmenu = this._menuLockscreenGroup.menu;
+
+        this._menuLockscreenEnabledSwitch = new PopupMenu.PopupSwitchMenuItem(
+            'Lock screen video',
+            this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED)
+        );
+        this._menuLockscreenEnabledId = this._menuLockscreenEnabledSwitch.connect('toggled', (_item, state) => {
+            this._settings.set_boolean(Keys.LOCKSCREEN_ENABLED, state);
+        });
+        lockscreenSubmenu.addMenuItem(this._menuLockscreenEnabledSwitch);
+
+        this._menuLsRandomOrderSwitch = new PopupMenu.PopupSwitchMenuItem(
+            'Random order',
+            this._settings.get_boolean(Keys.VIDEO_RANDOM_ORDER)
+        );
+        this._menuLsRandomOrderId = this._menuLsRandomOrderSwitch.connect('toggled', (_item, state) => {
+            this._settings.set_boolean(Keys.VIDEO_RANDOM_ORDER, state);
+        });
+        lockscreenSubmenu.addMenuItem(this._menuLsRandomOrderSwitch);
+
+        this._menuLsPerMonitorSwitch = new PopupMenu.PopupSwitchMenuItem(
+            'Per-monitor videos',
+            this._settings.get_boolean(Keys.LOCKSCREEN_PER_MONITOR)
+        );
+        this._menuLsPerMonitorId = this._menuLsPerMonitorSwitch.connect('toggled', (_item, state) => {
+            this._settings.set_boolean(Keys.LOCKSCREEN_PER_MONITOR, state);
+        });
+        lockscreenSubmenu.addMenuItem(this._menuLsPerMonitorSwitch);
+
+        this._menuLsMuteSwitch = new PopupMenu.PopupSwitchMenuItem(
+            'Mute lockscreen audio',
+            this._settings.get_int(Keys.AUDIO_VOLUME) === 0
+        );
+        this._menuLsMuteId = this._menuLsMuteSwitch.connect('toggled', (_item, state) => {
+            const current = this._settings.get_int(Keys.AUDIO_VOLUME);
+            if (state) {
+                if (current > 0)
+                    this._panelLsMuteRestoreVolume = current;
+                this._settings.set_int(Keys.AUDIO_VOLUME, 0);
+                return;
+            }
+            const restore = this._panelLsMuteRestoreVolume && this._panelLsMuteRestoreVolume > 0
+                ? this._panelLsMuteRestoreVolume
+                : 15;
+            this._settings.set_int(Keys.AUDIO_VOLUME, restore);
+        });
+        lockscreenSubmenu.addMenuItem(this._menuLsMuteSwitch);
+
+        this._menuLsBlurSwitch = new PopupMenu.PopupSwitchMenuItem(
+            'Blur',
+            (this._settings.get_int(Keys.BLUR_RADIUS) ?? 0) > 0
+        );
+        this._menuLsBlurId = this._menuLsBlurSwitch.connect('toggled', (_item, state) => {
+            const current = this._settings.get_int(Keys.BLUR_RADIUS);
+            if (!state) {
+                if (current > 0)
+                    this._panelLsBlurRestoreRadius = current;
+                this._settings.set_int(Keys.BLUR_RADIUS, 0);
+                return;
+            }
+            const restore = this._panelLsBlurRestoreRadius && this._panelLsBlurRestoreRadius > 0
+                ? this._panelLsBlurRestoreRadius
+                : 20;
+            this._settings.set_int(Keys.BLUR_RADIUS, restore);
+        });
+        lockscreenSubmenu.addMenuItem(this._menuLsBlurSwitch);
+
+        this._menuLsGrayscaleSwitch = new PopupMenu.PopupSwitchMenuItem(
+            'Grayscale effect',
+            this._settings.get_boolean(Keys.PROMPT_GRAYSCALE)
+        );
+        this._menuLsGrayscaleId = this._menuLsGrayscaleSwitch.connect('toggled', (_item, state) => {
+            this._settings.set_boolean(Keys.PROMPT_GRAYSCALE, state);
+        });
+        lockscreenSubmenu.addMenuItem(this._menuLsGrayscaleSwitch);
+
+        if (this._hasBatteryDevice()) {
+            this._menuLockscreenDisableOnBatterySwitch = new PopupMenu.PopupSwitchMenuItem(
+                'Disable on battery',
+                this._settings.get_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY)
+            );
+            this._menuLockscreenDisableOnBatteryId = this._menuLockscreenDisableOnBatterySwitch.connect('toggled', (_item, state) => {
+                this._settings.set_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY, state);
+            });
+            lockscreenSubmenu.addMenuItem(this._menuLockscreenDisableOnBatterySwitch);
+        }
+
+        this._panelButton.menu.addMenuItem(this._menuLockscreenGroup);
+
+        // Other settings (outside groups)
+        this._panelButton.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this._menuGtkRendererSwitch = new PopupMenu.PopupSwitchMenuItem(
             'Use GTK4 renderer',
@@ -487,70 +603,129 @@ export default class LockscreenExtension extends Extension {
             // Schema key is inverted: true means force legacy appsink.
             this._settings.set_boolean(Keys.DEBUG_USE_GTK4_SINK, !state);
         });
-        
+        this._panelButton.menu.addMenuItem(this._menuGtkRendererSwitch);
 
-        if (this._hasBatteryDevice()) {
-            this._menuDisableOnBatterySwitch = new PopupMenu.PopupSwitchMenuItem(
-                'Disable on battery',
-                this._settings.get_boolean(Keys.DISABLE_ON_BATTERY)
-            );
-            this._menuDisableOnBatteryId = this._menuDisableOnBatterySwitch.connect('toggled', (_item, state) => {
-                this._settings.set_boolean(Keys.DISABLE_ON_BATTERY, state);
-            });
-            
-        }
 
         this._menuRestartItem = new PopupMenu.PopupMenuItem('Restart Wallpaper');
         this._menuRestartId = this._menuRestartItem.connect('activate', () => {
             this._restartWallpaperFromMenu();
+            return false; // Prevent menu from closing
         });
-
-        // Quick toggles ordered by frequency/importance.
-        this._panelButton.menu.addMenuItem(this._menuRandomOrderSwitch);
-        this._panelButton.menu.addMenuItem(this._menuPerMonitorSwitch);
-        this._panelButton.menu.addMenuItem(this._menuPauseWhenHiddenSwitch);
-        this._panelButton.menu.addMenuItem(this._menuMuteSwitch);
-        this._panelButton.menu.addMenuItem(this._menuWallpaperBlurSwitch);
-        if (this._menuDisableOnBatterySwitch)
-            this._panelButton.menu.addMenuItem(this._menuDisableOnBatterySwitch);
-        this._panelButton.menu.addMenuItem(this._menuGtkRendererSwitch);
         this._panelButton.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this._panelButton.menu.addMenuItem(this._menuRestartItem);
 
         this._menuSettingsItem = new PopupMenu.PopupMenuItem('Open Settings');
         this._menuSettingsId = this._menuSettingsItem.connect('activate', () => {
             this.openPreferences();
+            return false; // Prevent menu from closing
         });
         this._panelButton.menu.addMenuItem(this._menuSettingsItem);
 
         Main.panel.addToStatusArea('live-lockpaper-indicator', this._panelButton, 1, 'right');
 
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.WALLPAPER_ENABLED}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.WALLPAPER_ENABLED}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuWallpaperEnabledSwitch)
+                    this._menuWallpaperEnabledSwitch.setToggleState(this._settings.get_boolean(Keys.WALLPAPER_ENABLED));
+            })
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.DEBUG_PAUSE_WHEN_HIDDEN}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.PAUSE_WHEN_HIDDEN_MODE}`, () => {
+                this._syncStatusIndicator();
+                this._updatePauseWhenHiddenMenuState();
+            })
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.WALLPAPER_BLUR_RADIUS}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.WALLPAPER_BLUR_RADIUS}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuWallpaperBlurSwitch)
+                    this._menuWallpaperBlurSwitch.setToggleState((this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS) ?? 0) > 0);
+            })
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.LOCKSCREEN_ENABLED}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.LOCKSCREEN_ENABLED}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuLockscreenEnabledSwitch)
+                    this._menuLockscreenEnabledSwitch.setToggleState(this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED));
+            })
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.WALLPAPER_RANDOM_ORDER}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.WALLPAPER_RANDOM_ORDER}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuRandomOrderSwitch)
+                    this._menuRandomOrderSwitch.setToggleState(this._settings.get_boolean(Keys.WALLPAPER_RANDOM_ORDER));
+            })
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.WALLPAPER_PER_MONITOR}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.WALLPAPER_PER_MONITOR}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuPerMonitorSwitch)
+                    this._menuPerMonitorSwitch.setToggleState(this._settings.get_boolean(Keys.WALLPAPER_PER_MONITOR));
+            })
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.WALLPAPER_VOLUME}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.WALLPAPER_VOLUME}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuMuteSwitch)
+                    this._menuMuteSwitch.setToggleState(this._settings.get_int(Keys.WALLPAPER_VOLUME) === 0);
+            })
+        );
+        this._panelSignals.push(
+            this._settings.connect(`changed::${Keys.VIDEO_RANDOM_ORDER}`, () => {
+                if (this._menuLsRandomOrderSwitch)
+                    this._menuLsRandomOrderSwitch.setToggleState(this._settings.get_boolean(Keys.VIDEO_RANDOM_ORDER));
+            })
+        );
+        this._panelSignals.push(
+            this._settings.connect(`changed::${Keys.LOCKSCREEN_PER_MONITOR}`, () => {
+                if (this._menuLsPerMonitorSwitch)
+                    this._menuLsPerMonitorSwitch.setToggleState(this._settings.get_boolean(Keys.LOCKSCREEN_PER_MONITOR));
+            })
+        );
+        this._panelSignals.push(
+            this._settings.connect(`changed::${Keys.AUDIO_VOLUME}`, () => {
+                if (this._menuLsMuteSwitch)
+                    this._menuLsMuteSwitch.setToggleState(this._settings.get_int(Keys.AUDIO_VOLUME) === 0);
+            })
+        );
+        this._panelSignals.push(
+            this._settings.connect(`changed::${Keys.BLUR_RADIUS}`, () => {
+                if (this._menuLsBlurSwitch)
+                    this._menuLsBlurSwitch.setToggleState((this._settings.get_int(Keys.BLUR_RADIUS) ?? 0) > 0);
+            })
         );
         this._panelSignals.push(
             this._settings.connect(`changed::${Keys.DEBUG_USE_GTK4_SINK}`, () => this._syncStatusIndicator())
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.DISABLE_ON_BATTERY}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.WALLPAPER_DISABLE_ON_BATTERY}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuWallpaperDisableOnBatterySwitch)
+                    this._menuWallpaperDisableOnBatterySwitch.setToggleState(this._settings.get_boolean(Keys.WALLPAPER_DISABLE_ON_BATTERY));
+                // Restart wallpaper immediately when battery setting changes
+                this._scheduleWallpaperRestart();
+            })
+        );
+        this._panelSignals.push(
+            this._settings.connect(`changed::${Keys.LOCKSCREEN_DISABLE_ON_BATTERY}`, () => {
+                this._syncStatusIndicator();
+                if (this._menuLockscreenDisableOnBatterySwitch)
+                    this._menuLockscreenDisableOnBatterySwitch.setToggleState(this._settings.get_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY));
+            })
+        );
+        this._panelSignals.push(
+            this._settings.connect(`changed::${Keys.PROMPT_GRAYSCALE}`, () => {
+                if (this._menuLsGrayscaleSwitch)
+                    this._menuLsGrayscaleSwitch.setToggleState(this._settings.get_boolean(Keys.PROMPT_GRAYSCALE));
+            })
+        );
+        this._panelSignals.push(
+            this._settings.connect(`changed::${Keys.PANEL_ICON_MODE}`, () => {
+                const wpEnabled = this._settings.get_boolean(Keys.WALLPAPER_ENABLED);
+                const lsEnabled = this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED);
+                this._updatePanelIcon(wpEnabled, lsEnabled);
+            })
         );
 
         this._syncStatusIndicator();
@@ -576,9 +751,7 @@ export default class LockscreenExtension extends Extension {
         if (this._menuLockscreenEnabledSwitch && this._menuLockscreenEnabledId) {
             try { this._menuLockscreenEnabledSwitch.disconnect(this._menuLockscreenEnabledId); } catch (_) {}
         }
-        if (this._menuPauseWhenHiddenSwitch && this._menuPauseWhenHiddenId) {
-            try { this._menuPauseWhenHiddenSwitch.disconnect(this._menuPauseWhenHiddenId); } catch (_) {}
-        }
+        // Pause when hidden menu item doesn't need disconnection
         if (this._menuRandomOrderSwitch && this._menuRandomOrderId) {
             try { this._menuRandomOrderSwitch.disconnect(this._menuRandomOrderId); } catch (_) {}
         }
@@ -594,8 +767,14 @@ export default class LockscreenExtension extends Extension {
         if (this._menuGtkRendererSwitch && this._menuGtkRendererId) {
             try { this._menuGtkRendererSwitch.disconnect(this._menuGtkRendererId); } catch (_) {}
         }
-        if (this._menuDisableOnBatterySwitch && this._menuDisableOnBatteryId) {
-            try { this._menuDisableOnBatterySwitch.disconnect(this._menuDisableOnBatteryId); } catch (_) {}
+        if (this._menuWallpaperDisableOnBatterySwitch && this._menuWallpaperDisableOnBatteryId) {
+            try { this._menuWallpaperDisableOnBatterySwitch.disconnect(this._menuWallpaperDisableOnBatteryId); } catch (_) {}
+        }
+        if (this._menuLockscreenDisableOnBatterySwitch && this._menuLockscreenDisableOnBatteryId) {
+            try { this._menuLockscreenDisableOnBatterySwitch.disconnect(this._menuLockscreenDisableOnBatteryId); } catch (_) {}
+        }
+        if (this._menuLsGrayscaleSwitch && this._menuLsGrayscaleId) {
+            try { this._menuLsGrayscaleSwitch.disconnect(this._menuLsGrayscaleId); } catch (_) {}
         }
         if (this._menuRestartItem && this._menuRestartId) {
             try { this._menuRestartItem.disconnect(this._menuRestartId); } catch (_) {}
@@ -608,32 +787,114 @@ export default class LockscreenExtension extends Extension {
         this._menuNextItem = null;
         this._menuWallpaperEnabledSwitch = null;
         this._menuLockscreenEnabledSwitch = null;
-        this._menuPauseWhenHiddenSwitch = null;
+        this._menuPauseWhenHiddenItem = null;
         this._menuRandomOrderSwitch = null;
         this._menuPerMonitorSwitch = null;
         this._menuWallpaperBlurSwitch = null;
         this._menuMuteSwitch = null;
         this._menuGtkRendererSwitch = null;
-        this._menuDisableOnBatterySwitch = null;
+        this._menuWallpaperDisableOnBatterySwitch = null;
+        this._menuLockscreenDisableOnBatterySwitch = null;
+        this._menuLsGrayscaleSwitch = null;
         this._menuRestartItem = null;
         this._menuSettingsItem = null;
         this._menuPlayPauseId = null;
         this._menuNextId = null;
         this._menuWallpaperEnabledId = null;
         this._menuLockscreenEnabledId = null;
-        this._menuPauseWhenHiddenId = null;
         this._menuRandomOrderId = null;
         this._menuPerMonitorId = null;
         this._menuWallpaperBlurId = null;
         this._menuMuteId = null;
         this._menuGtkRendererId = null;
-        this._menuDisableOnBatteryId = null;
+        this._menuWallpaperDisableOnBatteryId = null;
+        this._menuLockscreenDisableOnBatteryId = null;
+        this._menuLsGrayscaleId = null;
         this._menuRestartId = null;
         this._menuSettingsId = null;
 
         if (this._panelButton) {
             this._panelButton.destroy();
             this._panelButton = null;
+        }
+    }
+
+    _updatePanelIcon(wallpaperEnabled, lockscreenEnabled) {
+        if (!this._panelIcon || !this._settings)
+            return;
+
+        const iconMode = this._settings.get_int(Keys.PANEL_ICON_MODE) ?? 0;
+
+        if (iconMode === 2 || iconMode === 3) {
+            // Static mode - use original or custom static icon
+            let iconPath;
+            if (iconMode === 2) {
+                // Original static icon
+                iconPath = `${this.path}/icons/original.png`;
+            } else {
+                // Custom static icon (flower.png)
+                iconPath = `${this.path}/icons/flower.png`;
+            }
+            
+            try {
+                const gicon = Gio.icon_new_for_string(iconPath);
+                this._panelIcon.gicon = gicon;
+                this._panelIcon.icon_name = null;
+            } catch (_) {
+                // Fallback to original icon
+                try {
+                    const gicon = Gio.icon_new_for_string(`${this.path}/icons/original.png`);
+                    this._panelIcon.gicon = gicon;
+                    this._panelIcon.icon_name = null;
+                } catch (_) {}
+            }
+            return;
+        }
+
+        // Dynamic mode (0 = standard icons, 1 = custom icons)
+        if (iconMode === 1) {
+            // Custom dynamic icons - use fixed filenames
+            let iconPath;
+            if (wallpaperEnabled && lockscreenEnabled) {
+                iconPath = `${this.path}/icons/both.png`;
+            } else if (wallpaperEnabled) {
+                iconPath = `${this.path}/icons/wallpaper.png`;
+            } else if (lockscreenEnabled) {
+                iconPath = `${this.path}/icons/lockscreen.png`;
+            } else {
+                iconPath = `${this.path}/icons/none.png`;
+            }
+
+            try {
+                const gicon = Gio.icon_new_for_string(iconPath);
+                this._panelIcon.gicon = gicon;
+                this._panelIcon.icon_name = null;
+                return;
+            } catch (_) {
+                // Fall through to standard icons if custom fails
+            }
+        }
+
+        // Standard GNOME icons (mode 0 or fallback)
+        let iconName;
+        if (wallpaperEnabled && lockscreenEnabled) {
+            iconName = 'media-playback-start-symbolic';
+        } else if (wallpaperEnabled) {
+            iconName = 'preferences-desktop-wallpaper-symbolic';
+        } else if (lockscreenEnabled) {
+            iconName = 'system-lock-screen-symbolic';
+        } else {
+            iconName = 'video-x-generic-symbolic';
+        }
+
+        try {
+            this._panelIcon.icon_name = iconName;
+            this._panelIcon.gicon = null;
+        } catch (_) {
+            try {
+                this._panelIcon.icon_name = 'image-x-generic-symbolic';
+                this._panelIcon.gicon = null;
+            } catch (_) {}
         }
     }
 
@@ -649,6 +910,7 @@ export default class LockscreenExtension extends Extension {
 
         const isUserMode = Main.sessionMode.currentMode === 'user';
         const wallpaperEnabled = this._settings.get_boolean(Keys.WALLPAPER_ENABLED);
+        const lockscreenEnabled = this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED);
         const hasRuntime = !!this._wpPlayerProcess || (this._wpPipelines && this._wpPipelines.length > 0);
         const canControlPlayback = isUserMode && wallpaperEnabled && hasRuntime;
         const canToggleWallpaperFeatures = isUserMode && wallpaperEnabled;
@@ -656,49 +918,102 @@ export default class LockscreenExtension extends Extension {
 
         this._panelButton.visible = isUserMode;
 
-        this._menuPlayPauseItem.label.set_text(paused ? 'Play Wallpaper' : 'Pause Wallpaper');
-        this._menuPlayPauseItem.setSensitive(canControlPlayback);
-        this._menuNextItem.setSensitive(canControlPlayback && this._canAdvanceWallpaperPlaylist());
-        this._menuRestartItem.setSensitive(isUserMode);
+        // Update icon based on lockscreen and wallpaper states
+        this._updatePanelIcon(wallpaperEnabled, lockscreenEnabled);
 
-        if (this._menuWallpaperEnabledSwitch.state !== wallpaperEnabled)
+        if (this._menuPlayPauseItem) {
+            this._menuPlayPauseItem.label.set_text(paused ? 'Play Wallpaper' : 'Pause Wallpaper');
+            this._menuPlayPauseItem.setSensitive(canControlPlayback);
+        }
+        if (this._menuNextItem) {
+            this._menuNextItem.setSensitive(canControlPlayback && this._canAdvanceWallpaperPlaylist());
+        }
+        if (this._menuRestartItem) {
+            this._menuRestartItem.setSensitive(isUserMode);
+        }
+
+        if (this._menuWallpaperEnabledSwitch && this._menuWallpaperEnabledSwitch.state !== wallpaperEnabled)
             this._menuWallpaperEnabledSwitch.setToggleState(wallpaperEnabled);
-        if (this._menuLockscreenEnabledSwitch.state !== this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED))
-            this._menuLockscreenEnabledSwitch.setToggleState(this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED));
+        if (this._menuLockscreenEnabledSwitch) {
+            const lockscreenEnabled = this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED);
+            if (this._menuLockscreenEnabledSwitch.state !== lockscreenEnabled)
+                this._menuLockscreenEnabledSwitch.setToggleState(lockscreenEnabled);
+        }
 
-        const pauseWhenHidden = this._settings.get_boolean(Keys.DEBUG_PAUSE_WHEN_HIDDEN);
-        if (this._menuPauseWhenHiddenSwitch.state !== pauseWhenHidden)
-            this._menuPauseWhenHiddenSwitch.setToggleState(pauseWhenHidden);
-        this._menuPauseWhenHiddenSwitch.setSensitive(canToggleWallpaperFeatures);
+        this._updatePauseWhenHiddenMenuState();
+        if (this._menuPauseWhenHiddenItem)
+            this._menuPauseWhenHiddenItem.setSensitive(canToggleWallpaperFeatures);
+    }
+
+    _updatePauseWhenHiddenMenuLabel() {
+        if (!this._menuPauseWhenHiddenItem) return;
+        const mode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
+        let label;
+        if (mode === PauseWhenHiddenMode.OFF) {
+            label = 'Pause when hidden: Off';
+        } else if (mode === PauseWhenHiddenMode.ALL_MONITORS) {
+            label = 'Pause when hidden: All';
+        } else {
+            label = 'Pause when hidden: Any';
+        }
+        this._menuPauseWhenHiddenItem.label.text = label;
+    }
+
+    _updatePauseWhenHiddenMenuState() {
+        if (!this._menuPauseWhenHiddenItem) return;
+        this._updatePauseWhenHiddenMenuLabel();
+
+        // Define canToggleWallpaperFeatures for this function scope
+        const isUserMode = Main.sessionMode.currentMode === 'user';
+        const wallpaperEnabled = this._settings.get_boolean(Keys.WALLPAPER_ENABLED);
+        const canToggleWallpaperFeatures = isUserMode && wallpaperEnabled;
 
         const randomOrder = this._settings.get_boolean(Keys.WALLPAPER_RANDOM_ORDER);
-        if (this._menuRandomOrderSwitch.state !== randomOrder)
-            this._menuRandomOrderSwitch.setToggleState(randomOrder);
-        this._menuRandomOrderSwitch.setSensitive(canToggleWallpaperFeatures);
+        if (this._menuRandomOrderSwitch) {
+            if (this._menuRandomOrderSwitch.state !== randomOrder)
+                this._menuRandomOrderSwitch.setToggleState(randomOrder);
+            this._menuRandomOrderSwitch.setSensitive(canToggleWallpaperFeatures);
+        }
 
         const perMonitor = this._settings.get_boolean(Keys.WALLPAPER_PER_MONITOR);
-        if (this._menuPerMonitorSwitch.state !== perMonitor)
-            this._menuPerMonitorSwitch.setToggleState(perMonitor);
-        this._menuPerMonitorSwitch.setSensitive(canToggleWallpaperFeatures);
+        if (this._menuPerMonitorSwitch) {
+            if (this._menuPerMonitorSwitch.state !== perMonitor)
+                this._menuPerMonitorSwitch.setToggleState(perMonitor);
+            this._menuPerMonitorSwitch.setSensitive(canToggleWallpaperFeatures);
+        }
 
         const blurEnabled = (this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS) ?? 0) > 0;
-        if (this._menuWallpaperBlurSwitch.state !== blurEnabled)
-            this._menuWallpaperBlurSwitch.setToggleState(blurEnabled);
-        this._menuWallpaperBlurSwitch.setSensitive(canToggleWallpaperFeatures);
+        if (this._menuWallpaperBlurSwitch) {
+            if (this._menuWallpaperBlurSwitch.state !== blurEnabled)
+                this._menuWallpaperBlurSwitch.setToggleState(blurEnabled);
+            this._menuWallpaperBlurSwitch.setSensitive(canToggleWallpaperFeatures);
+        }
 
         const muted = this._settings.get_int(Keys.WALLPAPER_VOLUME) === 0;
-        if (this._menuMuteSwitch.state !== muted)
-            this._menuMuteSwitch.setToggleState(muted);
-        this._menuMuteSwitch.setSensitive(canToggleWallpaperFeatures);
+        if (this._menuMuteSwitch) {
+            if (this._menuMuteSwitch.state !== muted)
+                this._menuMuteSwitch.setToggleState(muted);
+            this._menuMuteSwitch.setSensitive(canToggleWallpaperFeatures);
+        }
 
         const useGtkRenderer = !this._settings.get_boolean(Keys.DEBUG_USE_GTK4_SINK);
         if (this._menuGtkRendererSwitch.state !== useGtkRenderer)
             this._menuGtkRendererSwitch.setToggleState(useGtkRenderer);
 
-        if (this._menuDisableOnBatterySwitch) {
-            const disableOnBattery = this._settings.get_boolean(Keys.DISABLE_ON_BATTERY);
-            if (this._menuDisableOnBatterySwitch.state !== disableOnBattery)
-                this._menuDisableOnBatterySwitch.setToggleState(disableOnBattery);
+        if (this._menuWallpaperDisableOnBatterySwitch) {
+            const disableOnBattery = this._settings.get_boolean(Keys.WALLPAPER_DISABLE_ON_BATTERY);
+            if (this._menuWallpaperDisableOnBatterySwitch.state !== disableOnBattery)
+                this._menuWallpaperDisableOnBatterySwitch.setToggleState(disableOnBattery);
+        }
+        if (this._menuLockscreenDisableOnBatterySwitch) {
+            const disableOnBattery = this._settings.get_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY);
+            if (this._menuLockscreenDisableOnBatterySwitch.state !== disableOnBattery)
+                this._menuLockscreenDisableOnBatterySwitch.setToggleState(disableOnBattery);
+        }
+        if (this._menuLsGrayscaleSwitch) {
+            const grayscale = this._settings.get_boolean(Keys.PROMPT_GRAYSCALE);
+            if (this._menuLsGrayscaleSwitch.state !== grayscale)
+                this._menuLsGrayscaleSwitch.setToggleState(grayscale);
         }
     }
 
@@ -785,8 +1100,7 @@ export default class LockscreenExtension extends Extension {
             }
             console.log('[LockScreen] _enableLockScreen called');
             if (!Main.screenShield?._dialog) {
-                // The dialog can appear late on some systems. Retry for a few
-                // seconds instead of giving up after a single attempt.
+            // Retry for a few seconds (dialog can appear late on some systems)
                 if (!this._lockRetryCount)
                     this._lockRetryCount = 0;
                 this._lockRetryCount += 1;
@@ -827,7 +1141,7 @@ export default class LockscreenExtension extends Extension {
         this._injectionManager = null;
 
         // Check battery — skip video lock screen to save power
-        if (this._settings.get_boolean(Keys.DISABLE_ON_BATTERY) && this._isOnBattery()) {
+        if (this._settings.get_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY) && this._isOnBattery()) {
             console.log('[LockScreen] Skipping — device is on battery power');
             return;
         }
@@ -948,10 +1262,7 @@ export default class LockscreenExtension extends Extension {
             }
         };
 
-        // NOTE: Force gpuColorConversion OFF for lock screen pipelines.
-        // Creating GL contexts (glupload/glcolorconvert/gldownload) during the
-        // lock-screen compositor transition can deadlock with Wayland/Mutter.
-        // CPU videoconvert is safe and lock screen pipelines are short-lived.
+        // Force gpuColorConversion OFF for lock screen (GL contexts can deadlock during lock transition)
         this._lockPerMonitorConfig = lockPerMonitorConfig;
         this._lockPipelineParams = { loop, autoFps, manualFramerate, skipFrame, preferHwDecoder, gpuColorConversion: false, adaptivePolling };
 
@@ -1108,7 +1419,7 @@ export default class LockscreenExtension extends Extension {
         this._showLockStartupCover();
 
         // Check battery
-        if (this._settings.get_boolean(Keys.DISABLE_ON_BATTERY) && this._isOnBattery()) {
+        if (this._settings.get_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY) && this._isOnBattery()) {
             console.log('[LockScreen:GTK4] Skipping — device is on battery power');
             return;
         }
@@ -1236,39 +1547,18 @@ export default class LockscreenExtension extends Extension {
             }
 
             // Store window actors by monitor index derived from the GTK window
-            // title (LiveLockPaper-<index>). Map-event ordering is not stable.
+            // Map-event ordering is not stable, use window title index
             windows.forEach((win, i) => {
                 const title = win.get_title() || '';
                 const match = title.match(/^LiveLockPaper-(\d+)$/);
                 const monitorIndex = match ? Number.parseInt(match[1], 10) : i;
                 const targetMonitor = monitors[monitorIndex] || monitors[i] || monitors[0];
+
                 if (targetMonitor) {
-                    const enforceFrame = () => {
-                        try {
-                            win.move_resize_frame(
-                                false,
-                                targetMonitor.x,
-                                targetMonitor.y,
-                                targetMonitor.width,
-                                targetMonitor.height
-                            );
-                        } catch (_) {
-                            try { win.move_frame(false, targetMonitor.x, targetMonitor.y); } catch (_) {}
-                        }
-                    };
-                    enforceFrame();
-                    GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                        if (!this._lockPlayerProcess)
-                            return GLib.SOURCE_REMOVE;
-                        enforceFrame();
-                        return GLib.SOURCE_REMOVE;
-                    });
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 260, () => {
-                        if (!this._lockPlayerProcess)
-                            return GLib.SOURCE_REMOVE;
-                        enforceFrame();
-                        return GLib.SOURCE_REMOVE;
-                    });
+                    // Position-only: don't resize (avoids Mutter auto-maximize).
+                    try {
+                        win.move_frame(false, targetMonitor.x, targetMonitor.y);
+                    } catch (_) {}
                 }
                 try { win.set_skip_taskbar(true); } catch (_) {
                     try { win.skip_taskbar = true; } catch (_) {}
@@ -1278,6 +1568,7 @@ export default class LockscreenExtension extends Extension {
                 }
                 this._lockWindowActors[monitorIndex] = win.get_compositor_private();
             });
+            this._refreshGtkHelperWindowHints('lock-map');
 
             // Override _createBackground to reparent our windows
             this._injectionManager.overrideMethod(
@@ -1386,16 +1677,8 @@ export default class LockscreenExtension extends Extension {
             const sigH = windowActor.connect('notify::height', queueFixPositionAndScale);
             this._lockPositionSignals.push({ actor: windowActor, ids: [sigX, sigY, sigW, sigH] });
             queueFixPositionAndScale();
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 260, () => {
-                if (!this._lockPlayerProcess)
-                    return GLib.SOURCE_REMOVE;
-                fixPositionAndScale();
-                return GLib.SOURCE_REMOVE;
-            });
 
-            // When the wrapper is destroyed (unlock), detach the actor. The
-            // helper process owns the toplevel window and will tear it down;
-            // re-inserting into window_group can confuse dock/window trackers.
+            // Detach actor on unlock (helper process owns the window)
             wrapper.connect('destroy', () => {
                 const p = windowActor.get_parent();
                 if (p) p.remove_child(windowActor);
@@ -1418,11 +1701,83 @@ export default class LockscreenExtension extends Extension {
     }
 
     _initLoginManagerSubprocess() {
+        // Disconnect existing sleep handler if any
+        if (this._sleepId) {
+            console.log('[LockScreen:GTK4] Disconnecting existing sleep handler');
+            this._loginManager?.disconnect(this._sleepId);
+            this._sleepId = null;
+        }
         this._loginManager = LoginManager.getLoginManager();
+        const verbose = this._isVerboseLoggingEnabled();
+        if (verbose) {
+            console.log('[LockScreen:GTK4] Initializing sleep handler for lockscreen subprocess');
+        }
         this._sleepId = this._loginManager.connect('prepare-for-sleep', (_manager, aboutToSleep) => {
-            if (!this._lockPlayerProcess) return;
-            aboutToSleep ? this._lockPlayerProcess.pause() : this._lockPlayerProcess.play();
+            const verbose = this._isVerboseLoggingEnabled();
+            const timestamp = verbose ? new Date().toISOString() : null;
+            
+            if (verbose) {
+                console.log(`[LockScreen:GTK4] prepare-for-sleep: aboutToSleep=${aboutToSleep}, currentMode=${Main.sessionMode.currentMode}, hasLockPlayerProcess=${!!this._lockPlayerProcess}`);
+            }
+            
+            if (aboutToSleep) {
+                // Destroy lockscreen video process on sleep to prevent it from blocking sleep
+                console.log(`[LockScreen:GTK4] ⏸️  SLEEP: Destroying lockscreen${verbose ? ` [${timestamp}]` : ''}`);
+                if (this._lockPlayerProcess) {
+                    if (verbose) console.log(`[LockScreen:GTK4] SLEEP: Destroying player process (PID=${this._lockPlayerProcess.pid})`);
+                    // Disconnect position/scale watchers
+                    if (this._lockPositionSignals) {
+                        for (const { actor, ids } of this._lockPositionSignals) {
+                            for (const id of ids) {
+                                try { actor.disconnect(id); } catch (_) {}
+                            }
+                        }
+                        this._lockPositionSignals = [];
+                    }
+                    // Detach all window actors before destroying
+                    for (const windowActor of Object.values(this._lockWindowActors)) {
+                        try {
+                            windowActor.set_translation(0, 0, 0);
+                            windowActor.set_scale(1, 1);
+                            const parent = windowActor.get_parent();
+                            if (parent) parent.remove_child(windowActor);
+                            windowActor.hide();
+                        } catch (e) {}
+                    }
+                    this._lockWindowActors = {};
+                    this._lockPlayerProcess.destroy();
+                    this._lockPlayerProcess = null;
+                    if (verbose) console.log('[LockScreen:GTK4] SLEEP: Player process destroyed');
+                }
+                // Clear injection manager (will be recreated on wake if needed)
+                if (this._injectionManager) {
+                    if (verbose) console.log('[LockScreen:GTK4] SLEEP: Clearing injection manager');
+                    this._injectionManager.clear();
+                    this._injectionManager = null;
+                }
+            } else {
+                // On wake, recreate lockscreen video if system is still locked
+                const lockscreenEnabled = this._settings?.get_boolean(Keys.LOCKSCREEN_ENABLED);
+                const shouldRecreate = Main.sessionMode.currentMode === 'unlock-dialog' && lockscreenEnabled;
+                
+                if (verbose) {
+                    const wakeTimestamp = new Date().toISOString();
+                    console.log(`[LockScreen:GTK4] ▶️  WAKE: System RESUMED [${wakeTimestamp}]`);
+                    console.log(`[LockScreen:GTK4] WAKE: currentMode=${Main.sessionMode.currentMode}, lockscreenEnabled=${lockscreenEnabled}, shouldRecreate=${shouldRecreate}`);
+                } else {
+                    console.log(`[LockScreen:GTK4] ▶️  WAKE: ${shouldRecreate ? 'Recreating lockscreen' : 'Not recreating'}`);
+                }
+                
+                if (shouldRecreate) {
+                    if (verbose) console.log('[LockScreen:GTK4] WAKE: Recreating player process (system still locked)');
+                    // Re-setup the lockscreen subprocess
+                    this._setupLockScreenSubprocess();
+                }
+            }
         });
+        if (verbose) {
+            console.log('[LockScreen:GTK4] Sleep handler initialized');
+        }
     }
 
     _disableLockScreen() {
@@ -1753,6 +2108,113 @@ export default class LockscreenExtension extends Extension {
         }
     }
 
+    _initWallpaperSleepHandler() {
+        // Disconnect existing wallpaper sleep handler if any
+        if (this._wpSleepId) {
+            console.log('[Wallpaper] Disconnecting existing wallpaper sleep handler');
+            this._loginManager?.disconnect(this._wpSleepId);
+            this._wpSleepId = null;
+        }
+        
+        // Get or create login manager
+        if (!this._loginManager) {
+            this._loginManager = LoginManager.getLoginManager();
+        }
+        
+        if (this._isVerboseLoggingEnabled()) {
+            console.log('[Wallpaper] Initializing sleep handler for wallpaper');
+        }
+        this._wpSleepId = this._loginManager.connect('prepare-for-sleep', (_manager, aboutToSleep) => {
+            try {
+                const verbose = this._isVerboseLoggingEnabled();
+                const timestamp = verbose ? new Date().toISOString() : null;
+                
+                const wpPipelinesValue = this._wpPipelines;
+                const hasPipelines = !!(wpPipelinesValue && Array.isArray(wpPipelinesValue) && wpPipelinesValue.length > 0);
+                const hasSubprocess = !!this._wpPlayerProcess;
+                const pipelineCount = hasPipelines ? wpPipelinesValue.length : 0;
+                const subprocessPid = hasSubprocess ? this._wpPlayerProcess.pid : 'N/A';
+                
+                if (verbose) {
+                    console.log(`[Wallpaper] prepare-for-sleep: aboutToSleep=${aboutToSleep}, currentMode=${Main.sessionMode.currentMode}`);
+                    console.log(`[Wallpaper] State: hasPipelines=${hasPipelines}, hasSubprocess=${hasSubprocess}, subprocessPid=${subprocessPid}`);
+                }
+                
+                if (aboutToSleep) {
+                    // Pause wallpaper on sleep to prevent it from blocking sleep
+                    console.log(`[Wallpaper] ⏸️  SLEEP: Pausing wallpaper${verbose ? ` [${timestamp}]` : ''}`);
+                    if (hasPipelines) {
+                        if (verbose) console.log(`[Wallpaper] SLEEP: Pausing ${pipelineCount} pipeline(s)`);
+                        this._wpPipelines.forEach((p, idx) => {
+                            try {
+                                p.pause();
+                                if (verbose) console.log(`[Wallpaper] SLEEP: Pipeline ${idx} paused`);
+                            } catch (e) {
+                                console.error(`[Wallpaper] SLEEP: Error pausing pipeline ${idx}: ${e.message}`);
+                            }
+                        });
+                    }
+                    if (hasSubprocess) {
+                        if (verbose) console.log(`[Wallpaper] SLEEP: Pausing subprocess (PID=${subprocessPid})`);
+                        try {
+                            this._wpPlayerProcess.pause();
+                            if (verbose) console.log(`[Wallpaper] SLEEP: Subprocess paused`);
+                        } catch (e) {
+                            console.error(`[Wallpaper] SLEEP: Error pausing subprocess: ${e.message}`);
+                        }
+                    }
+                    this._wallpaperWasPausedForSleep = true;
+                } else {
+                    // On wake, resume wallpaper if in desktop mode
+                    const wallpaperEnabled = this._settings?.get_boolean(Keys.WALLPAPER_ENABLED);
+                    const shouldResume = Main.sessionMode.currentMode === 'user' && 
+                        wallpaperEnabled &&
+                        this._wallpaperWasPausedForSleep;
+                    
+                    if (verbose) {
+                        const wakeTimestamp = new Date().toISOString();
+                        console.log(`[Wallpaper] ▶️  WAKE: System RESUMED [${wakeTimestamp}]`);
+                        console.log(`[Wallpaper] WAKE: currentMode=${Main.sessionMode.currentMode}, wallpaperEnabled=${wallpaperEnabled}, wasPausedForSleep=${this._wallpaperWasPausedForSleep}, shouldResume=${shouldResume}`);
+                    } else {
+                        console.log(`[Wallpaper] ▶️  WAKE: Resuming wallpaper`);
+                    }
+                    
+                    if (shouldResume) {
+                        if (verbose) console.log('[Wallpaper] WAKE: Starting resume sequence...');
+                        if (hasPipelines) {
+                            if (verbose) console.log(`[Wallpaper] WAKE: Resuming ${pipelineCount} pipeline(s)`);
+                            this._wpPipelines.forEach((p, idx) => {
+                                try {
+                                    p.play();
+                                    if (verbose) console.log(`[Wallpaper] WAKE: Pipeline ${idx} resumed`);
+                                } catch (e) {
+                                    console.error(`[Wallpaper] WAKE: Error resuming pipeline ${idx}: ${e.message}`);
+                                }
+                            });
+                        }
+                        if (hasSubprocess) {
+                            if (verbose) console.log(`[Wallpaper] WAKE: Resuming subprocess (PID=${subprocessPid})`);
+                            try {
+                                this._wpPlayerProcess.play();
+                                if (verbose) console.log(`[Wallpaper] WAKE: Subprocess resumed`);
+                            } catch (e) {
+                                console.error(`[Wallpaper] WAKE: Error resuming subprocess: ${e.message}`);
+                            }
+                        }
+                        this._wallpaperWasPausedForSleep = false;
+                    } else if (verbose) {
+                        console.log('[Wallpaper] WAKE: Not resuming wallpaper (conditions not met)');
+                    }
+                }
+            } catch (e) {
+                console.error(`[Wallpaper] Error in sleep handler: ${e.message}\n${e.stack}`);
+            }
+        });
+        if (this._isVerboseLoggingEnabled()) {
+            console.log('[Wallpaper] Sleep handler initialized');
+        }
+    }
+
     _startAnimation() {
         this._actors.forEach(actor => actor.ease({
             opacity: 255,
@@ -1762,19 +2224,83 @@ export default class LockscreenExtension extends Extension {
     }
 
     _initLoginManager() {
-        this._loginManager = LoginManager.getLoginManager();
-        this._sleepId = this._loginManager.connect('prepare-for-sleep', (manager, aboutToSleep) => {
-            // Handle shared pipeline
-            if (this._pipeline) {
-            aboutToSleep ? this._pipeline.pause() : this._pipeline.play();
+        // Disconnect existing sleep handler if any
+        if (this._sleepId) {
+            if (this._isVerboseLoggingEnabled()) {
+                console.log('[LockScreen] Disconnecting existing sleep handler');
             }
-            // Handle per-monitor pipelines
-            if (this._lockPipelines) {
-                this._lockPipelines.forEach(p => {
-                    aboutToSleep ? p.pause() : p.play();
-                });
+            this._loginManager?.disconnect(this._sleepId);
+            this._sleepId = null;
+        }
+        this._loginManager = LoginManager.getLoginManager();
+        const verbose = this._isVerboseLoggingEnabled();
+        if (verbose) {
+            console.log('[LockScreen] Initializing sleep handler for lockscreen appsink');
+        }
+        this._sleepId = this._loginManager.connect('prepare-for-sleep', (manager, aboutToSleep) => {
+            const verbose = this._isVerboseLoggingEnabled();
+            const timestamp = verbose ? new Date().toISOString() : null;
+            const hasPipeline = !!this._pipeline;
+            const hasPipelines = this._lockPipelines && this._lockPipelines.length > 0;
+            const pipelineCount = hasPipelines ? this._lockPipelines.length : 0;
+            
+            if (verbose) {
+                console.log(`[LockScreen] prepare-for-sleep: aboutToSleep=${aboutToSleep}, currentMode=${Main.sessionMode.currentMode}`);
+                console.log(`[LockScreen] State: hasPipeline=${hasPipeline}, hasPipelines=${hasPipelines}, pipelineCount=${pipelineCount}`);
+            }
+            
+            if (aboutToSleep) {
+                // Destroy lockscreen video pipelines on sleep to prevent them from blocking sleep
+                console.log(`[LockScreen] ⏸️  SLEEP: Destroying lockscreen${verbose ? ` [${timestamp}]` : ''}`);
+                // Destroy shared pipeline
+                if (this._pipeline) {
+                    if (verbose) console.log('[LockScreen] SLEEP: Destroying shared pipeline');
+                    this._pipeline.destroy();
+                    this._pipeline = null;
+                }
+                // Destroy per-monitor pipelines
+                if (this._lockPipelines && this._lockPipelines.length > 0) {
+                    if (verbose) console.log(`[LockScreen] SLEEP: Destroying ${pipelineCount} per-monitor pipeline(s)`);
+                    this._lockPipelines.forEach(p => p.destroy());
+                    this._lockPipelines = [];
+                }
+                this._lockMonitorStates = [];
+                // Clear actors and images
+                if (this._actors && this._actors.length > 0) {
+                    if (verbose) console.log(`[LockScreen] SLEEP: Destroying ${this._actors.length} actor(s)`);
+                    this._actors.forEach(a => {
+                        try { a.remove_effect_by_name('lockscreen-extension-blur'); } catch (e) {}
+                        a.destroy();
+                    });
+                    this._actors = [];
+                }
+                if (this._images) {
+                    if (verbose) console.log('[LockScreen] SLEEP: Clearing images');
+                    this._images = [];
+                }
+            } else {
+                // On wake, recreate lockscreen video if system is still locked
+                const lockscreenEnabled = this._settings?.get_boolean(Keys.LOCKSCREEN_ENABLED);
+                const shouldRecreate = Main.sessionMode.currentMode === 'unlock-dialog' && lockscreenEnabled;
+                
+                if (verbose) {
+                    const wakeTimestamp = new Date().toISOString();
+                    console.log(`[LockScreen] ▶️  WAKE: System RESUMED [${wakeTimestamp}]`);
+                    console.log(`[LockScreen] WAKE: currentMode=${Main.sessionMode.currentMode}, lockscreenEnabled=${lockscreenEnabled}, shouldRecreate=${shouldRecreate}`);
+                } else {
+                    console.log(`[LockScreen] ▶️  WAKE: ${shouldRecreate ? 'Recreating lockscreen' : 'Not recreating'}`);
+                }
+                
+                if (shouldRecreate) {
+                    if (verbose) console.log('[LockScreen] WAKE: Recreating pipelines (system still locked)');
+                    // Re-setup the lockscreen
+                    this._setupLockScreen();
+                }
             }
         });
+        if (verbose) {
+            console.log('[LockScreen] Sleep handler initialized');
+        }
     }
 
     _initPipeline() {
@@ -1924,7 +2450,7 @@ export default class LockscreenExtension extends Extension {
         }
 
         // Optional battery guard.
-        if (this._settings.get_boolean(Keys.DISABLE_ON_BATTERY) && this._isOnBattery()) {
+        if (this._settings.get_boolean(Keys.WALLPAPER_DISABLE_ON_BATTERY) && this._isOnBattery()) {
             console.log('[Wallpaper] Skipping — device is on battery power');
             this._wpSettingsIds = [];
             const enableId = this._settings.connect('changed::' + Keys.WALLPAPER_ENABLED, () => {
@@ -1954,13 +2480,15 @@ export default class LockscreenExtension extends Extension {
         const randomOrder = this._settings.get_boolean(Keys.WALLPAPER_RANDOM_ORDER);
         const preferHwDecoder = this._settings.get_boolean(Keys.DEBUG_PREFER_HW_DECODER);
         const gpuColorConversion = this._settings.get_boolean(Keys.DEBUG_GPU_COLOR_CONVERSION);
-        const pauseWhenHidden = this._settings.get_boolean(Keys.DEBUG_PAUSE_WHEN_HIDDEN);
+        const pauseWhenHiddenMode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
+        const pauseWhenHidden = pauseWhenHiddenMode !== PauseWhenHiddenMode.OFF;
         const adaptivePolling = this._settings.get_boolean(Keys.DEBUG_PUSH_FRAME_DELIVERY);
 
         this._wpActors = [];
         this._wpImages = [];
         this._wpPipelines = [];
         this._wpMonitorStates = []; // For per-monitor playlist state
+        this._wallpaperWasPausedForSleep = false;
 
         const backend = Clutter.get_default_backend();
         this._wpCoglContext = backend.get_cogl_context();
@@ -2220,11 +2748,22 @@ export default class LockscreenExtension extends Extension {
 
         // Set up pause-when-hidden if enabled
         if (pauseWhenHidden) {
-            this._setupPauseWhenHidden();
+            // Mark as not ready initially to prevent immediate pausing
+            this._wpPauseWhenHiddenReady = false;
+            // Delay the initial check to avoid pausing immediately after startup
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                this._setupPauseWhenHidden();
+                this._wpPauseWhenHiddenReady = true;
+                return GLib.SOURCE_REMOVE;
+            });
+        } else {
+            this._wpPauseWhenHiddenReady = false;
         }
 
         // Watch for settings changes to live-reload
         this._setupWallpaperSettingsWatch();
+        // Initialize sleep handling for wallpaper
+        this._initWallpaperSleepHandler();
         this._syncStatusIndicator();
     }
 
@@ -2237,6 +2776,7 @@ export default class LockscreenExtension extends Extension {
         this._wpPlayerProcess = null;
         this._wpWindowActors = {};
         this._wpSubprocessMonitorVideos = [];
+        this._wallpaperWasPausedForSleep = false;
 
         const perMonitor = this._settings.get_boolean(Keys.WALLPAPER_PER_MONITOR);
         const scalingMode = this._settings.get_int(Keys.WALLPAPER_SCALING_MODE);
@@ -2247,7 +2787,8 @@ export default class LockscreenExtension extends Extension {
         const fadeInDuration = this._settings.get_int(Keys.WALLPAPER_FADE_IN_DURATION);
         const blurRadius = this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS);
         const blurBrightness = this._settings.get_double(Keys.WALLPAPER_BLUR_BRIGHTNESS);
-        const pauseWhenHidden = this._settings.get_boolean(Keys.DEBUG_PAUSE_WHEN_HIDDEN);
+        const pauseWhenHiddenMode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
+        const pauseWhenHidden = pauseWhenHiddenMode !== PauseWhenHiddenMode.OFF;
 
         const monitors = Main.layoutManager.monitors;
         const subprocessMonitors = [];
@@ -2332,149 +2873,154 @@ export default class LockscreenExtension extends Extension {
         const monitorCount = monitors.length;
         this._wpPlayerProcess.waitForWindows(monitorCount, 10000, (windows) => {
             console.log(`[Wallpaper:GTK4] All ${windows.length} window(s) mapped`);
+            this._debugDumpWindowSnapshot('wallpaper-map-callback');
 
             const themeContext = St.ThemeContext.get_for_stage(global.stage);
             const adjustedBlurRadius = blurRadius * themeContext.scale_factor;
             this._wpPositionSignals = [];
 
-            for (let i = 0; i < windows.length; i++) {
-                const win = windows[i];
+            // Use title-based monitor index — this is set explicitly by player.js
+            // win.get_monitor() is not reliable here
+            // Wayland may not have placed the window on the correct monitor yet.
+            let reparentedCount = 0;
+            const totalWindows = windows.length;
+            
+            const checkAllReparented = () => {
+                if (reparentedCount === totalWindows) {
+                    // Fade in
+                    if (fadeInDuration > 0) {
+                        this._wpActors.forEach(a => a.ease({
+                            opacity: 255,
+                            duration: fadeInDuration,
+                            mode: Clutter.AnimationMode.EASE_IN_QUAD,
+                        }));
+                    }
+
+                    this._wpPlayerProcess.play();
+                    console.log(`[Wallpaper:GTK4] ${this._wpActors.length} window(s) reparented and playing`);
+                    this._debugDumpWindowSnapshot('wallpaper-playing');
+
+                    // Set up pause-when-hidden if enabled
+                    if (pauseWhenHidden) {
+                        // Mark as not ready initially to prevent immediate pausing
+                        this._wpPauseWhenHiddenReady = false;
+                        // Delay the initial check to avoid pausing immediately after startup
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                            this._setupPauseWhenHiddenSubprocess();
+                            this._wpPauseWhenHiddenReady = true;
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    } else {
+                        this._wpPauseWhenHiddenReady = false;
+                    }
+                    this._syncStatusIndicator();
+                }
+            };
+            
+            for (const win of windows) {
                 const title = win.get_title() || '';
                 const match = title.match(/^LiveLockPaper-(\d+)$/);
-                const mappedMonitorIndex = match ? Number.parseInt(match[1], 10) : i;
-                const targetMonitor = monitors[mappedMonitorIndex] || monitors[i] || monitors[0];
-                if (targetMonitor) {
-                    const enforceFrame = () => {
-                        try {
-                            win.move_resize_frame(
-                                false,
-                                targetMonitor.x,
-                                targetMonitor.y,
-                                targetMonitor.width,
-                                targetMonitor.height
-                            );
-                        } catch (_) {
-                            try { win.move_frame(false, targetMonitor.x, targetMonitor.y); } catch (_) {}
-                        }
-                    };
-                    enforceFrame();
-                    GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                        if (!this._wpPlayerProcess)
-                            return GLib.SOURCE_REMOVE;
-                        enforceFrame();
-                        return GLib.SOURCE_REMOVE;
-                    });
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 260, () => {
-                        if (!this._wpPlayerProcess)
-                            return GLib.SOURCE_REMOVE;
-                        enforceFrame();
-                        return GLib.SOURCE_REMOVE;
-                    });
-                }
-                try { win.set_skip_taskbar(true); } catch (_) {
-                    try { win.skip_taskbar = true; } catch (_) {}
-                }
-                try { win.set_skip_pager(true); } catch (_) {
-                    try { win.skip_pager = true; } catch (_) {}
-                }
-                const windowActor = win.get_compositor_private();
-                if (!windowActor) continue;
+                const monitorIndex = match ? Number.parseInt(match[1], 10) : 0;
 
-                this._wpWindowActors[mappedMonitorIndex] = windowActor;
+                const monitor = monitors[monitorIndex];
+                if (!monitor) {
+                    console.warn(`[Wallpaper:GTK4] No monitor at index ${monitorIndex}, skipping`);
+                    reparentedCount++;
+                    checkAllReparented();
+                    continue;
+                }
+
+                // Position window on correct monitor immediately
+                // This must happen before reparenting to ensure correct placement
+                try {
+                    win.move_resize_frame(false, monitor.x, monitor.y, monitor.width, monitor.height);
+                } catch (_) {}
+
+                // Ensure skip flags are set (they should already be set in player_process.js)
+                try { win.set_skip_taskbar(true); } catch (_) {}
+                try { win.set_skip_pager(true); } catch (_) {}
+
+                // Reparent immediately - this prevents Mutter from moving the window
+                // Once reparented, the window actor is under our control
+                const windowActor = win.get_compositor_private();
+                if (!windowActor) {
+                    reparentedCount++;
+                    checkAllReparented();
+                    continue;
+                }
+
+                this._wpWindowActors[monitorIndex] = windowActor;
                 const parent = windowActor.get_parent();
                 if (parent) parent.remove_child(windowActor);
 
-                // Position the wrapper at the monitor's geometry.
-                // Do NOT use win.make_fullscreen() — it moves the window
-                // to Mutter's fullscreen layer (above the panel/dock) and
-                // can cause the compositor to reclaim the actor.
-                const monitor = monitors[mappedMonitorIndex] || monitors[i] || monitors[0];
-                const wrapper = new Clutter.Actor({
-                    x: monitor.x,
-                    y: monitor.y,
-                    width: monitor.width,
-                    height: monitor.height,
-                    clip_to_allocation: true,
-                });
-
-                if (adjustedBlurRadius > 0) {
-                    wrapper.add_effect(new Shell.BlurEffect({
-                        name: 'wallpaper-blur',
-                        radius: adjustedBlurRadius,
-                        brightness: blurBrightness,
-                    }));
-                }
-
-                wrapper.add_child(windowActor);
-                windowActor.reactive = false;
-
-                // Translation-only fitting avoids resampling artifacts.
-                const fixPositionAndScale = () => {
-                    const ax = windowActor.x;
-                    const ay = windowActor.y;
-                    windowActor.set_translation(-Math.round(ax), -Math.round(ay), 0);
-                    windowActor.set_pivot_point(0, 0);
-                    windowActor.set_scale(1, 1);
-                };
-                let wpFixQueued = 0;
-                const queueFixPositionAndScale = () => {
-                    if (wpFixQueued)
-                        return;
-                    wpFixQueued = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                        wpFixQueued = 0;
-                        if (!this._wpPlayerProcess)
-                            return GLib.SOURCE_REMOVE;
-                        fixPositionAndScale();
-                        return GLib.SOURCE_REMOVE;
+                    // Position the wrapper at the monitor's geometry.
+                    // Do NOT use win.make_fullscreen() — it moves the window
+                    // to Mutter's fullscreen layer (above the panel/dock) and
+                    // can cause the compositor to reclaim the actor.
+                    const wrapper = new Clutter.Actor({
+                        x: monitor.x,
+                        y: monitor.y,
+                        width: monitor.width,
+                        height: monitor.height,
+                        clip_to_allocation: true,
                     });
-                };
-                const sigX = windowActor.connect('notify::x', queueFixPositionAndScale);
-                const sigY = windowActor.connect('notify::y', queueFixPositionAndScale);
-                const sigW = windowActor.connect('notify::width', queueFixPositionAndScale);
-                const sigH = windowActor.connect('notify::height', queueFixPositionAndScale);
-                this._wpPositionSignals.push({ actor: windowActor, ids: [sigX, sigY, sigW, sigH] });
-                queueFixPositionAndScale();
-                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 260, () => {
-                    if (!this._wpPlayerProcess)
-                        return GLib.SOURCE_REMOVE;
-                    fixPositionAndScale();
-                    return GLib.SOURCE_REMOVE;
-                });
 
-                if (fadeInDuration > 0) wrapper.opacity = 0;
+                    if (adjustedBlurRadius > 0) {
+                        wrapper.add_effect(new Shell.BlurEffect({
+                            name: 'wallpaper-blur',
+                            radius: adjustedBlurRadius,
+                            brightness: blurBrightness,
+                        }));
+                    }
 
-                Main.layoutManager._backgroundGroup.add_child(wrapper);
-                Main.layoutManager._backgroundGroup.set_child_above_sibling(wrapper, null);
+                    wrapper.add_child(windowActor);
+                    windowActor.reactive = false;
 
-                this._wpActors.push(wrapper);
+                    // Translation-only fitting avoids resampling artifacts.
+                    const fixPositionAndScale = () => {
+                        const ax = windowActor.x;
+                        const ay = windowActor.y;
+                        windowActor.set_translation(-Math.round(ax), -Math.round(ay), 0);
+                        windowActor.set_pivot_point(0, 0);
+                        windowActor.set_scale(1, 1);
+                    };
+                    let wpFixQueued = 0;
+                    const queueFixPositionAndScale = () => {
+                        if (wpFixQueued)
+                            return;
+                        wpFixQueued = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                            wpFixQueued = 0;
+                            if (!this._wpPlayerProcess)
+                                return GLib.SOURCE_REMOVE;
+                            fixPositionAndScale();
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    };
+                    const sigX = windowActor.connect('notify::x', queueFixPositionAndScale);
+                    const sigY = windowActor.connect('notify::y', queueFixPositionAndScale);
+                    const sigW = windowActor.connect('notify::width', queueFixPositionAndScale);
+                    const sigH = windowActor.connect('notify::height', queueFixPositionAndScale);
+                    this._wpPositionSignals.push({ actor: windowActor, ids: [sigX, sigY, sigW, sigH] });
+                    queueFixPositionAndScale();
+
+                    if (fadeInDuration > 0) wrapper.opacity = 0;
+
+                    Main.layoutManager._backgroundGroup.add_child(wrapper);
+                    Main.layoutManager._backgroundGroup.set_child_above_sibling(wrapper, null);
+
+                    this._wpActors.push(wrapper);
+                    reparentedCount++;
+                    checkAllReparented();
             }
-            // Re-assert helper hints after map/reparent. Some shell/dock setups
-            // appear to drop these around lock/unlock transitions.
-            this._refreshGtkHelperWindowHints('wallpaper-map');
-
-            // Fade in
-            if (fadeInDuration > 0) {
-                this._wpActors.forEach(a => a.ease({
-                    opacity: 255,
-                    duration: fadeInDuration,
-                    mode: Clutter.AnimationMode.EASE_IN_QUAD,
-                }));
-            }
-
-            this._wpPlayerProcess.play();
-            console.log(`[Wallpaper:GTK4] ${this._wpActors.length} window(s) reparented and playing`);
-
-            // Set up pause-when-hidden if enabled
-            if (pauseWhenHidden) {
-                this._setupPauseWhenHiddenSubprocess();
-            }
-            this._syncStatusIndicator();
         }, (err) => {
             console.error(`[Wallpaper:GTK4] ${err}`);
+            this._debugDumpWindowSnapshot('wallpaper-map-error');
             this._syncStatusIndicator();
         });
 
         this._setupWallpaperSettingsWatch();
+        // Initialize sleep handling for wallpaper
+        this._initWallpaperSleepHandler();
     }
 
     // Pause-when-hidden watchers for subprocess wallpaper.
@@ -2484,6 +3030,27 @@ export default class LockscreenExtension extends Extension {
         this._wpRestackedId = global.display.connect('restacked', () => {
             this._checkDesktopVisibilitySubprocess();
         });
+
+        // Watch for window state changes (fullscreen, maximize, etc.)
+        // Note: window-state-changed might not exist on all GNOME versions
+        try {
+            this._wpWindowStateChangedId = global.display.connect('window-state-changed', () => {
+                this._checkDesktopVisibilitySubprocess();
+            });
+        } catch (e) {
+            console.warn('[Wallpaper:GTK4] window-state-changed signal not available, using periodic check only');
+            this._wpWindowStateChangedId = null;
+        }
+
+        // Periodic check (every 300ms) - this is the main mechanism
+        this._wpVisibilityCheckId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            300,
+            () => {
+                this._checkDesktopVisibilitySubprocess();
+                return GLib.SOURCE_CONTINUE;
+            }
+        );
 
         this._wpOverviewShowingId = Main.overview.connect('showing', () => {
             if (this._wpDesktopHidden) {
@@ -2505,6 +3072,12 @@ export default class LockscreenExtension extends Extension {
         if (!this._wpPlayerProcess) return;
         if (this._wallpaperWasPaused) return;
         if (this._manualWallpaperPaused) return;
+        
+        // Don't check immediately after setup - give wallpapers time to start
+        if (!this._wpPauseWhenHiddenReady) return;
+
+        const pauseMode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
+        if (pauseMode === PauseWhenHiddenMode.OFF) return;
 
         if (Main.overview.visible) {
             if (this._wpDesktopHidden) {
@@ -2515,13 +3088,23 @@ export default class LockscreenExtension extends Extension {
         }
 
         const monitors = Main.layoutManager.monitors;
-        const allCovered = monitors.every(m => this._isMonitorFullyCovered(m.index));
+        const coverage = monitors.map(m => ({ index: m.index, covered: this._isMonitorFullyCovered(m.index) }));
+        
+        let shouldPause = false;
+        if (pauseMode === PauseWhenHiddenMode.ALL_MONITORS) {
+            shouldPause = coverage.every(c => c.covered);
+        } else if (pauseMode === PauseWhenHiddenMode.ANY_MONITOR) {
+            shouldPause = coverage.some(c => c.covered);
+        }
+        
+        this._debugLogCoverageState('subprocess', coverage, shouldPause);
 
-        if (allCovered && !this._wpDesktopHidden) {
+        if (shouldPause && !this._wpDesktopHidden) {
             this._wpDesktopHidden = true;
             this._wpPlayerProcess.pause();
-            console.log(`[Wallpaper:GTK4] Desktop fully covered, pausing`);
-        } else if (!allCovered && this._wpDesktopHidden) {
+            const modeText = pauseMode === PauseWhenHiddenMode.ALL_MONITORS ? 'all monitors' : 'any monitor';
+            console.log(`[Wallpaper:GTK4] Desktop fully covered (${modeText}), pausing`);
+        } else if (!shouldPause && this._wpDesktopHidden) {
             this._wpDesktopHidden = false;
             this._wpPlayerProcess.play();
             console.log(`[Wallpaper:GTK4] Desktop visible again, resuming`);
@@ -2530,8 +3113,7 @@ export default class LockscreenExtension extends Extension {
 
     // Watch wallpaper settings and trigger debounced restart.
     _setupWallpaperSettingsWatch() {
-        // Disconnect any existing watchers first (fixes toggle bug where only
-        // the WALLPAPER_ENABLED watcher was active after first enable)
+        // Disconnect existing watchers first
         if (this._wpSettingsIds && this._wpSettingsIds.length > 0 && this._settings) {
             this._wpSettingsIds.forEach(id => {
                 try { this._settings.disconnect(id); } catch (e) { }
@@ -2547,8 +3129,8 @@ export default class LockscreenExtension extends Extension {
             Keys.WALLPAPER_VOLUME, Keys.WALLPAPER_RANDOM_ORDER,
             Keys.WALLPAPER_FADE_IN_DURATION, Keys.WALLPAPER_QUALITY,
             Keys.DEBUG_PREFER_HW_DECODER, Keys.DEBUG_GPU_COLOR_CONVERSION,
-            Keys.DEBUG_PAUSE_WHEN_HIDDEN, Keys.DEBUG_PUSH_FRAME_DELIVERY,
-            Keys.DEBUG_USE_GTK4_SINK, Keys.DISABLE_ON_BATTERY,
+            Keys.DEBUG_PUSH_FRAME_DELIVERY,
+            Keys.DEBUG_USE_GTK4_SINK,
         ];
         watchKeys.forEach(key => {
             const id = this._settings.connect('changed::' + key, () => {
@@ -2556,42 +3138,232 @@ export default class LockscreenExtension extends Extension {
             });
             this._wpSettingsIds.push(id);
         });
+        
+        // Handle pause-when-hidden mode change separately (no restart needed)
+        const pauseWhenHiddenId = this._settings.connect(`changed::${Keys.PAUSE_WHEN_HIDDEN_MODE}`, () => {
+            // Just update the pause-when-hidden watchers without restarting wallpaper
+            this._cleanupPauseWhenHidden();
+            const pauseMode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
+            if (pauseMode !== PauseWhenHiddenMode.OFF) {
+                // Set up watchers if wallpaper is already running
+                this._wpPauseWhenHiddenReady = false;
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                    if (this._wpPlayerProcess) {
+                        // Subprocess mode
+                        this._setupPauseWhenHiddenSubprocess();
+                    } else if (this._wpPipelines && this._wpPipelines.length > 0) {
+                        // Appsink mode
+                        this._setupPauseWhenHidden();
+                    }
+                    this._wpPauseWhenHiddenReady = true;
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
+        });
+        this._wpSettingsIds.push(pauseWhenHiddenId);
     }
 
     // Debounced wallpaper restart.
     _scheduleWallpaperRestart() {
+        if (!this._active)
+            return;
         if (this._wpRestartTimeout) {
             GLib.Source.remove(this._wpRestartTimeout);
         }
+        this._wpRestartSerial = (this._wpRestartSerial ?? 0) + 1;
+        const restartSerial = this._wpRestartSerial;
         this._wpRestartTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
             this._wpRestartTimeout = null;
+            if (!this._active)
+                return GLib.SOURCE_REMOVE;
+            if (restartSerial !== this._wpRestartSerial)
+                return GLib.SOURCE_REMOVE;
+            if (this._wpRestartInFlight) {
+                this._wpRestartPending = true;
+                return GLib.SOURCE_REMOVE;
+            }
+            this._wpRestartInFlight = true;
             try {
                 console.log('[Wallpaper] Settings changed, restarting wallpaper...');
-                this._teardownWallpaper();
-                this._enableWallpaper();
+                console.log(`[Wallpaper:GTK4] diag marker: restart verbose=${this._isVerboseGtkHelperLoggingEnabled()} serial=${restartSerial}`);
+                this._debugDumpWindowSnapshot('settings-restart-pre');
+                this._refreshGtkHelperWindowHints('settings-restart-pre-teardown');
+                const hadSubprocess = !!this._wpPlayerProcess;
+                const previousWpPid = this._wpPlayerProcess?.pid ?? null;
+                this._teardownWallpaper({ keepRestartState: true });
+                const finishRestart = () => {
+                    if (!this._active) {
+                        this._wpRestartInFlight = false;
+                        return GLib.SOURCE_REMOVE;
+                    }
+                    this._debugDumpWindowSnapshot('settings-restart-before-enable');
+                    this._enableWallpaper();
+                    this._debugDumpWindowSnapshot('settings-restart-after-enable');
+                    // Re-assert skip_taskbar/skip_pager after a short delay
+                    // in case Mutter resets them during compositor transitions.
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+                        this._refreshGtkHelperWindowHints('settings-restart-500ms');
+                        this._debugDumpWindowSnapshot('settings-restart-500ms');
+                        // Only verify windows if using GTK4 sink (PlayerProcess)
+                        // and only if we're not already in a restart
+                        if (this._wpRestartInFlight || this._wpRestartTimeout) {
+                            return GLib.SOURCE_REMOVE;
+                        }
+                        // Only verify windows for GTK4 sink (appsink doesn't use PlayerProcess)
+                        if (!this._wpPlayerProcess) {
+                            return GLib.SOURCE_REMOVE;
+                        }
+                        // Give windows more time to appear, especially when switching sinks
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1500, () => {
+                            // Double-check we're still not in a restart
+                            if (this._wpRestartInFlight || this._wpRestartTimeout || !this._active) {
+                                return GLib.SOURCE_REMOVE;
+                            }
+                            // Only verify if we're still using GTK4 sink
+                            if (!this._wpPlayerProcess) {
+                                return GLib.SOURCE_REMOVE;
+                            }
+                            const expectedMonitors = Main.layoutManager.monitors.length;
+                            const actualWindows = this._wpPlayerProcess._windows?.length ?? 0;
+                            // Only retry if we have significantly fewer windows than expected
+                            // Allow some tolerance for timing issues
+                            if (actualWindows === 0 && expectedMonitors > 0) {
+                                console.warn(`[Wallpaper:GTK4] No windows found, expected ${expectedMonitors}. This may be normal when switching sinks.`);
+                                // Don't auto-retry - let user manually restart if needed
+                                // Auto-retry can cause loops when switching sinks
+                            }
+                            return GLib.SOURCE_REMOVE;
+                        });
+                        return GLib.SOURCE_REMOVE;
+                    });
+                    this._wpRestartInFlight = false;
+                    if (this._wpRestartPending) {
+                        this._wpRestartPending = false;
+                        this._scheduleWallpaperRestart();
+                    }
+                    return GLib.SOURCE_REMOVE;
+                };
+                if (hadSubprocess) {
+                    // Drain old helper windows before respawn to avoid overlap
+                    // races that can hide dock/top bar on some systems.
+                    this._waitForGtkHelperDrain(previousWpPid, 3000, finishRestart);
+                } else {
+                    finishRestart();
+                }
             } catch (e) {
+                this._wpRestartInFlight = false;
                 console.error(`[Wallpaper] Restart failed: ${e.message}\n${e.stack}`);
             }
             return GLib.SOURCE_REMOVE;
         });
     }
 
+    _hasGtkHelperWindows(pidHint = null) {
+        try {
+            const windowActors = global.get_window_actors();
+            for (const wa of windowActors) {
+                let win;
+                try { win = wa.meta_window; } catch (_) { continue; }
+                if (!win)
+                    continue;
+                const title = win.get_title?.() ?? '';
+                const pid = win.get_pid?.() ?? 0;
+                if (title.startsWith('LiveLockPaper-'))
+                    return true;
+                if (pidHint && pid === pidHint)
+                    return true;
+            }
+        } catch (_) {}
+        return false;
+    }
+
+    _waitForGtkHelperDrain(pidHint, timeoutMs, onDone) {
+        if (this._wpHelperDrainTimeout) {
+            GLib.Source.remove(this._wpHelperDrainTimeout);
+            this._wpHelperDrainTimeout = null;
+        }
+        if (!this._hasGtkHelperWindows(pidHint)) {
+            this._debugDumpWindowSnapshot('drain-skip-no-helper');
+            onDone?.();
+            return;
+        }
+        this._debugDumpWindowSnapshot('drain-start');
+        const startUs = GLib.get_monotonic_time();
+        this._wpHelperDrainTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60, () => {
+            if (!this._active) {
+                this._wpHelperDrainTimeout = null;
+                this._debugDumpWindowSnapshot('drain-abort-inactive');
+                onDone?.();
+                return GLib.SOURCE_REMOVE;
+            }
+            if (!this._hasGtkHelperWindows(pidHint)) {
+                this._wpHelperDrainTimeout = null;
+                this._debugDumpWindowSnapshot('drain-finished');
+                onDone?.();
+                return GLib.SOURCE_REMOVE;
+            }
+            const elapsedMs = Math.floor((GLib.get_monotonic_time() - startUs) / 1000);
+            if (elapsedMs >= timeoutMs) {
+                console.log(`[Wallpaper:GTK4] helper drain timed out at ${elapsedMs}ms; continuing restart`);
+                this._wpHelperDrainTimeout = null;
+                this._debugDumpWindowSnapshot('drain-timeout');
+                onDone?.();
+                return GLib.SOURCE_REMOVE;
+            }
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
     // Tear down wallpaper runtime without touching settings watchers.
-    _teardownWallpaper() {
+    _teardownWallpaper({ keepRestartState = false } = {}) {
+        this._debugDumpWindowSnapshot('teardown-start');
         if (this._wpRestartTimeout) {
             GLib.Source.remove(this._wpRestartTimeout);
             this._wpRestartTimeout = null;
         }
+        if (this._wpHelperDrainTimeout) {
+            GLib.Source.remove(this._wpHelperDrainTimeout);
+            this._wpHelperDrainTimeout = null;
+        }
+        if (!keepRestartState) {
+            this._wpRestartInFlight = false;
+            this._wpRestartPending = false;
+        }
         // Clean up pause-when-hidden watchers
         this._cleanupPauseWhenHidden();
+
+        // Clean up wallpaper sleep handler
+        if (this._wpSleepId) {
+            if (this._isVerboseLoggingEnabled()) {
+                console.log('[Wallpaper] Disconnecting wallpaper sleep handler during teardown');
+            }
+            this._loginManager?.disconnect(this._wpSleepId);
+            this._wpSleepId = null;
+        }
 
         // Subprocess player cleanup
         if (this._wpPlayerProcess) {
             // Disconnect position/scale watchers
             if (this._wpPositionSignals) {
-                for (const { actor, ids } of this._wpPositionSignals) {
-                    for (const id of ids) {
-                        try { actor.disconnect(id); } catch (_) {}
+                for (const entry of this._wpPositionSignals) {
+                    if (entry.actor) {
+                        // Actor signals (position/scale watchers)
+                        for (const id of entry.ids) {
+                            try { entry.actor.disconnect(id); } catch (_) {}
+                        }
+                    } else if (entry.win) {
+                        // Window signals (position/maximize watchers) and timeouts
+                        for (const id of entry.ids) {
+                            try {
+                                if (typeof id === 'number') {
+                                    // Timeout ID
+                                    GLib.source_remove(id);
+                                } else {
+                                    // Signal ID
+                                    entry.win.disconnect(id);
+                                }
+                            } catch (_) {}
+                        }
                     }
                 }
                 this._wpPositionSignals = [];
@@ -2603,7 +3375,6 @@ export default class LockscreenExtension extends Extension {
                     windowActor.set_scale(1, 1);
                     const parent = windowActor.get_parent();
                     if (parent) parent.remove_child(windowActor);
-                    global.window_group.add_child(windowActor);
                     windowActor.hide();
                 } catch (e) {}
             }
@@ -2630,6 +3401,7 @@ export default class LockscreenExtension extends Extension {
         }
         this._wpSubprocessMonitorVideos = [];
         this._syncStatusIndicator();
+        this._debugDumpWindowSnapshot('teardown-done');
     }
 
     // Pause-when-hidden
@@ -2642,6 +3414,27 @@ export default class LockscreenExtension extends Extension {
         this._wpRestackedId = global.display.connect('restacked', () => {
             this._checkDesktopVisibility();
         });
+
+        // Watch for window state changes (fullscreen, maximize, etc.)
+        // Note: window-state-changed might not exist on all GNOME versions
+        try {
+            this._wpWindowStateChangedId = global.display.connect('window-state-changed', () => {
+                this._checkDesktopVisibility();
+            });
+        } catch (e) {
+            console.warn('[Wallpaper] window-state-changed signal not available, using periodic check only');
+            this._wpWindowStateChangedId = null;
+        }
+
+        // Periodic check (every 300ms) - this is the main mechanism
+        this._wpVisibilityCheckId = GLib.timeout_add(
+            GLib.PRIORITY_DEFAULT,
+            300,
+            () => {
+                this._checkDesktopVisibility();
+                return GLib.SOURCE_CONTINUE;
+            }
+        );
 
         // Watch for overview — desktop is visible during overview
         this._wpOverviewShowingId = Main.overview.connect('showing', () => {
@@ -2668,6 +3461,9 @@ export default class LockscreenExtension extends Extension {
         if (!this._wpPipelines || this._wpPipelines.length === 0) return;
         if (this._wallpaperWasPaused) return; // Paused for lock — don't interfere
         if (this._manualWallpaperPaused) return;
+        
+        // Don't check immediately after setup - give wallpapers time to start
+        if (!this._wpPauseWhenHiddenReady) return;
 
         // If overview is open, desktop is visible
         if (Main.overview.visible) {
@@ -2679,17 +3475,30 @@ export default class LockscreenExtension extends Extension {
             return;
         }
 
-        const monitors = Main.layoutManager.monitors;
-        const allCovered = monitors.every((monitor) => {
-            return this._isMonitorFullyCovered(monitor.index);
-        });
+        const pauseMode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
+        if (pauseMode === PauseWhenHiddenMode.OFF) return;
 
-        if (allCovered && !this._wpDesktopHidden) {
+        const monitors = Main.layoutManager.monitors;
+        const coverage = monitors.map(m => ({ index: m.index, covered: this._isMonitorFullyCovered(m.index) }));
+        
+        let shouldPause = false;
+        if (pauseMode === PauseWhenHiddenMode.ALL_MONITORS) {
+            shouldPause = coverage.every(c => c.covered);
+        } else if (pauseMode === PauseWhenHiddenMode.ANY_MONITOR) {
+            shouldPause = coverage.some(c => c.covered);
+        }
+        
+        this._debugLogCoverageState('appsink', coverage, shouldPause);
+
+        if (shouldPause && !this._wpDesktopHidden) {
             this._wpDesktopHidden = true;
+            // Use the same pause method as the panel button
             this._wpPipelines.forEach(p => p.pause());
-            console.log(`[Wallpaper] Desktop fully covered (${monitors.length} monitor(s)), pausing ${this._wpPipelines.length} pipeline(s)`);
-        } else if (!allCovered && this._wpDesktopHidden) {
+            const modeText = pauseMode === PauseWhenHiddenMode.ALL_MONITORS ? 'all monitors' : 'any monitor';
+            console.log(`[Wallpaper] Desktop fully covered (${modeText}), pausing ${this._wpPipelines.length} pipeline(s)`);
+        } else if (!shouldPause && this._wpDesktopHidden) {
             this._wpDesktopHidden = false;
+            // Use the same play method as the panel button
             this._wpPipelines.forEach(p => p.play());
             console.log(`[Wallpaper] Desktop visible again, resuming ${this._wpPipelines.length} pipeline(s)`);
         }
@@ -2703,38 +3512,64 @@ export default class LockscreenExtension extends Extension {
             const lockPid = this._lockPlayerProcess?.pid ?? null;
             for (const wa of windowActors) {
                 // Window actors can be disposed during compositor transitions
-                // (lock screen, overview, etc.) — guard every access.
+                // Guard every access (actors can be disposed during transitions)
                 let win;
                 try { win = wa.meta_window; } catch (e) { continue; }
                 if (!win || win.minimized) continue;
+                
                 // Ignore our own helper GTK windows, otherwise pause-when-hidden
                 // sees the desktop as permanently covered and pauses forever.
                 const pid = win.get_pid?.() ?? 0;
                 if ((wpPid && pid === wpPid) || (lockPid && pid === lockPid))
                     continue;
+                
                 // Also ignore helper windows by title in case PID filtering races
                 // during lock/unlock teardown (PID can be gone before actor cleanup).
                 const title = win.get_title?.() ?? '';
                 if (title.startsWith('LiveLockPaper-'))
                     continue;
+                
+                // Skip if not on the target monitor
                 if (win.get_monitor() !== monitorIndex) continue;
+                
+                // Only check normal windows (not desktop, dock, etc.)
                 if (win.window_type !== Meta.WindowType.NORMAL) continue;
-                if (win.is_fullscreen() || (win.maximized_horizontally && win.maximized_vertically)) {
+                
+                // Check if window is fullscreen - this is the key check
+                // Fullscreen apps will have is_fullscreen() = true
+                const isFullscreen = win.is_fullscreen();
+                if (isFullscreen) {
                     return true;
+                }
+                
+                // Also check for maximized windows that cover the entire monitor
+                if (win.maximized_horizontally && win.maximized_vertically) {
+                    // Double-check geometry to ensure it actually covers the monitor
+                    const monitor = Main.layoutManager.monitors[monitorIndex];
+                    if (monitor) {
+                        const frame = win.get_frame_rect();
+                        // Check if window covers at least 95% of monitor
+                        const monitorArea = monitor.width * monitor.height;
+                        const frameArea = frame.width * frame.height;
+                        const coverageRatio = monitorArea > 0 ? frameArea / monitorArea : 0;
+                        if (coverageRatio >= 0.95) {
+                            return true;
+                        }
+                    }
                 }
             }
         } catch (e) {
-            // Silently fail — better to resume playback than crash
+            console.warn(`[Wallpaper] Error checking monitor coverage: ${e.message}`);
         }
         return false;
     }
 
+    // Refresh helper-window hints: skip_taskbar and skip_pager.
     _refreshGtkHelperWindowHints(reason = 'unspecified') {
         try {
             const windowActors = global.get_window_actors();
             const wpPid = this._wpPlayerProcess?.pid ?? null;
             const lockPid = this._lockPlayerProcess?.pid ?? null;
-            const primaryMonitor = Main.layoutManager?.primaryMonitor ?? null;
             for (const wa of windowActors) {
                 let win;
                 try { win = wa.meta_window; } catch (e) { continue; }
@@ -2742,35 +3577,99 @@ export default class LockscreenExtension extends Extension {
                     continue;
                 const title = win.get_title?.() ?? '';
                 const pid = win.get_pid?.() ?? 0;
-                const isHelperByTitle = title.startsWith('LiveLockPaper-');
-                const isHelperByPid = (wpPid && pid === wpPid) || (lockPid && pid === lockPid);
-                if (!isHelperByTitle && !isHelperByPid)
+                const isHelper = title.startsWith('LiveLockPaper-') ||
+                    (wpPid && pid === wpPid) || (lockPid && pid === lockPid);
+                if (!isHelper)
                     continue;
 
-                try { win.set_skip_taskbar(true); } catch (_) {
-                    try { win.skip_taskbar = true; } catch (_) {}
+                // On Wayland, set_skip_taskbar() is read-only, so we override
+                // the JS property getter to make dock extensions ignore our helpers
+                if (!win.__llp_skipTaskbarOverride) {
+                    try {
+                        Object.defineProperty(win, 'skip_taskbar', {
+                            get: () => true,
+                            configurable: true,
+                        });
+                        // Also override the method form in case the dock calls it
+                        win.is_skip_taskbar = () => true;
+                        win.__llp_skipTaskbarOverride = true;
+                    } catch (_) {}
                 }
                 try { win.set_skip_pager(true); } catch (_) {
                     try { win.skip_pager = true; } catch (_) {}
                 }
-                // Keep wallpaper helper MetaWindows associated with primary monitor.
-                // We render detached actors into per-monitor wrappers, so monitor
-                // assignment for the hidden helper windows is only for WM/dock logic.
-                if (primaryMonitor && wpPid && pid === wpPid) {
-                    try { win.move_frame(false, primaryMonitor.x, primaryMonitor.y); } catch (_) {}
-                }
 
-                const verboseHelperLogs = this._settings?.get_boolean?.(Keys.DEBUG_GTK_HELPER_LOGS) ?? false;
-                if (verboseHelperLogs) {
-                    console.log(
-                        `[Wallpaper:GTK4] helper-hints(${reason}) title="${title}" monitor=${win.get_monitor?.()} ` +
-                        `type=${win.window_type} fullscreen=${win.is_fullscreen?.()} ` +
-                        `max=${win.maximized_horizontally && win.maximized_vertically} ` +
-                        `skip_taskbar=${win.skip_taskbar} skip_pager=${win.skip_pager}`
-                    );
-                }
+                const isFs = win.is_fullscreen?.() ?? false;
+                const isMaxH = !!win.maximized_horizontally;
+                const isMaxV = !!win.maximized_vertically;
+                const monIdx = win.get_monitor?.() ?? -1;
+
+                // Always log helper state (not gated by verbose) so we can
+                // diagnose dock/panel hide issues from the journal.
+                console.log(
+                    `[Wallpaper:GTK4] helper-state(${reason}) "${title}" pid=${pid} mon=${monIdx} ` +
+                    `fs=${isFs} maxH=${isMaxH} maxV=${isMaxV} ` +
+                    `skipT=${!!win.skip_taskbar} skipP=${!!win.skip_pager} ` +
+                    `type=${win.window_type} override=${!!win.__llp_skipTaskbarOverride}`
+                );
             }
         } catch (e) {}
+    }
+
+    _isVerboseGtkHelperLoggingEnabled() {
+        return this._settings?.get_boolean?.(Keys.DEBUG_GTK_HELPER_LOGS) ?? false;
+    }
+
+    _isVerboseLoggingEnabled() {
+        // Use the existing verbose GTK helper logs setting for all verbose logging
+        return this._settings?.get_boolean?.(Keys.DEBUG_GTK_HELPER_LOGS) ?? false;
+    }
+
+    _debugLogCoverageState(kind, coverage, allCovered) {
+        if (!this._isVerboseGtkHelperLoggingEnabled())
+            return;
+        const key = `${kind}|${allCovered}|${coverage.map(c => `${c.index}:${c.covered ? 1 : 0}`).join(',')}`;
+        if (this._lastCoverageDebugKey === key)
+            return;
+        this._lastCoverageDebugKey = key;
+        console.log(`[Wallpaper:GTK4] coverage(${kind}) allCovered=${allCovered} byMonitor=${coverage.map(c => `${c.index}:${c.covered ? 'covered' : 'clear'}`).join(' ')}`);
+        this._debugDumpWindowSnapshot(`coverage-${kind}`);
+    }
+
+    _debugDumpWindowSnapshot(reason = 'snapshot') {
+        if (!this._isVerboseGtkHelperLoggingEnabled())
+            return;
+        try {
+            const rows = [];
+            const windowActors = global.get_window_actors();
+            const wpPid = this._wpPlayerProcess?.pid ?? null;
+            const lockPid = this._lockPlayerProcess?.pid ?? null;
+            for (const wa of windowActors) {
+                let win;
+                try { win = wa.meta_window; } catch (_) { continue; }
+                if (!win)
+                    continue;
+                const title = win.get_title?.() ?? '';
+                const pid = win.get_pid?.() ?? 0;
+                const isHelper = title.startsWith('LiveLockPaper-') || (wpPid && pid === wpPid) || (lockPid && pid === lockPid);
+                const isFullscreen = !!win.is_fullscreen?.();
+                const isMaximized = !!(win.maximized_horizontally && win.maximized_vertically);
+                const isInteresting = isHelper || isFullscreen || isMaximized || win.window_type === Meta.WindowType.NORMAL;
+                if (!isInteresting)
+                    continue;
+                rows.push(
+                    `title="${title}" pid=${pid} mon=${win.get_monitor?.()} type=${win.window_type} ` +
+                    `fs=${isFullscreen} max=${isMaximized} min=${!!win.minimized} ` +
+                    `skipT=${!!win.skip_taskbar} skipP=${!!win.skip_pager} helper=${isHelper}`
+                );
+            }
+            console.log(`[Wallpaper:GTK4] snapshot(${reason}) mode=${Main.sessionMode.currentMode} wpPid=${wpPid ?? 0} lockPid=${lockPid ?? 0} rows=${rows.length}`);
+            rows.forEach((line, idx) => {
+                console.log(`[Wallpaper:GTK4]   [${idx}] ${line}`);
+            });
+        } catch (e) {
+            console.error(`[Wallpaper:GTK4] snapshot(${reason}) failed: ${e.message}`);
+        }
     }
 
     // Disconnect pause-when-hidden handlers.
@@ -2778,6 +3677,14 @@ export default class LockscreenExtension extends Extension {
         if (this._wpRestackedId) {
             global.display.disconnect(this._wpRestackedId);
             this._wpRestackedId = null;
+        }
+        if (this._wpWindowStateChangedId) {
+            global.display.disconnect(this._wpWindowStateChangedId);
+            this._wpWindowStateChangedId = null;
+        }
+        if (this._wpVisibilityCheckId) {
+            GLib.source_remove(this._wpVisibilityCheckId);
+            this._wpVisibilityCheckId = null;
         }
         if (this._wpOverviewShowingId) {
             Main.overview.disconnect(this._wpOverviewShowingId);
@@ -2831,7 +3738,6 @@ export default class LockscreenExtension extends Extension {
             if (hasSubprocess) {
                 console.log('[Wallpaper:GTK4] Resuming subprocess');
                 this._wpPlayerProcess.play();
-                this._refreshGtkHelperWindowHints('resume-immediate');
             }
             this._wallpaperWasPaused = false;
             this._wpDesktopHidden = false;
@@ -2839,7 +3745,6 @@ export default class LockscreenExtension extends Extension {
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
                 if (hasPipelines) this._checkDesktopVisibility();
                 if (hasSubprocess) {
-                    this._refreshGtkHelperWindowHints('resume-200ms');
                     this._checkDesktopVisibilitySubprocess();
                 }
                 return GLib.SOURCE_REMOVE;
@@ -2852,7 +3757,6 @@ export default class LockscreenExtension extends Extension {
                     return GLib.SOURCE_REMOVE;
                 if (hasSubprocess && this._wpPlayerProcess) {
                     this._wpPlayerProcess.play();
-                    this._refreshGtkHelperWindowHints('resume-900ms');
                     this._checkDesktopVisibilitySubprocess();
                 }
                 if (hasPipelines && this._wpPipelines?.length > 0) {
@@ -2860,6 +3764,14 @@ export default class LockscreenExtension extends Extension {
                     this._checkDesktopVisibility();
                 }
                 this._syncStatusIndicator();
+                return GLib.SOURCE_REMOVE;
+            });
+            // After lock-screen windows are gone, clear auto-maximize on
+            // wallpaper helpers so the dock doesn't dodge them.
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 600, () => {
+                if (Main.sessionMode.currentMode !== 'user')
+                    return GLib.SOURCE_REMOVE;
+                this._refreshGtkHelperWindowHints('post-resume-600ms');
                 return GLib.SOURCE_REMOVE;
             });
             this._syncStatusIndicator();
