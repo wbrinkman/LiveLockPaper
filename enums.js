@@ -29,7 +29,8 @@ export const Keys = {
     PROMPT_GRAYSCALE: "prompt-grayscale",
 
     // General
-    DISABLE_ON_BATTERY: "general-disable-on-battery",
+    WALLPAPER_DISABLE_ON_BATTERY: "wallpaper-disable-on-battery",
+    LOCKSCREEN_DISABLE_ON_BATTERY: "lockscreen-disable-on-battery",
 
     // Lock screen per-monitor
     LOCKSCREEN_PER_MONITOR: "background-video-per-monitor",
@@ -39,11 +40,17 @@ export const Keys = {
     DEBUG_USE_UNSAFE_PIPELINE: "debug-use-unsafe-pipeline",
     DEBUG_PREFER_HW_DECODER: "debug-prefer-hardware-decoder",
     DEBUG_GPU_COLOR_CONVERSION: "debug-gpu-color-conversion",
-    DEBUG_PAUSE_WHEN_HIDDEN: "debug-pause-when-hidden",
+    PAUSE_WHEN_HIDDEN_MODE: "pause-when-hidden-mode",
     DEBUG_PUSH_FRAME_DELIVERY: "debug-push-frame-delivery",
     DEBUG_USE_GTK4_SINK: "debug-use-gtk4-sink",
     DEBUG_GTK_HELPER_LOGS: "debug-gtk-helper-logs",
     DEBUG_SHOW_PANEL_BUTTON: "debug-show-panel-button",
+    PANEL_ICON_MODE: "panel-icon-mode",
+    PANEL_ICON_CUSTOM_STATIC: "panel-icon-custom-static",
+    PANEL_ICON_CUSTOM_DYNAMIC_WALLPAPER: "panel-icon-custom-dynamic-wallpaper",
+    PANEL_ICON_CUSTOM_DYNAMIC_LOCKSCREEN: "panel-icon-custom-dynamic-lockscreen",
+    PANEL_ICON_CUSTOM_DYNAMIC_BOTH: "panel-icon-custom-dynamic-both",
+    PANEL_ICON_CUSTOM_DYNAMIC_NONE: "panel-icon-custom-dynamic-none",
 
     // Wallpaper settings
     WALLPAPER_ENABLED: "wallpaper-enabled",
@@ -73,4 +80,10 @@ export const TransitionType = {
     NONE: 0,
     FADE: 1,
     CROSSFADE: 2,
+}
+
+export const PauseWhenHiddenMode = {
+    OFF: 0,
+    ALL_MONITORS: 1,
+    ANY_MONITOR: 2,
 }

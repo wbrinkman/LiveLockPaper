@@ -151,6 +151,12 @@
             <summary>Pause wallpaper when desktop is hidden</summary>
             <description>Automatically pause wallpaper video playback when all monitors are fully covered by maximised or fullscreen windows. Saves CPU/GPU when the wallpaper is not visible.</description>
         </key>
+        <key name="pause-when-hidden-mode" type="i">
+            <range min="0" max="2" />
+            <default>2</default>
+            <summary>Pause wallpaper when hidden mode</summary>
+            <description>0 = Off (never pause), 1 = Pause when all monitors are fullscreen, 2 = Pause when any monitor is fullscreen</description>
+        </key>
         <key name="debug-push-frame-delivery" type="b">
             <default>false</default>
             <summary>Adaptive frame polling</summary>
@@ -163,13 +169,44 @@
         </key>
         <key name="debug-gtk-helper-logs" type="b">
             <default>false</default>
-            <summary>Enable verbose GTK helper window logging</summary>
-            <description>When enabled, logs detailed helper window hint state (taskbar/pager/monitor/type/fullscreen/maximized) during GTK4 wallpaper lock/unlock flows. Keep disabled for normal use to reduce journal noise.</description>
+            <summary>Enable verbose logging</summary>
+            <description>When enabled, logs detailed information including GTK helper window state, sleep/wake events, and other debug information. Keep disabled for normal use to reduce journal noise.</description>
         </key>
         <key name="debug-show-panel-button" type="b">
             <default>true</default>
             <summary>Show top bar controls button</summary>
             <description>Shows the Live LockPaper quick-controls button in the top bar with play/pause, next video, and quick toggles. Disable to hide the panel button.</description>
+        </key>
+        <key name="panel-icon-mode" type="i">
+            <range min="0" max="3" />
+            <default>0</default>
+            <summary>Panel icon mode</summary>
+            <description>0 = Dynamic (standard GNOME icons), 1 = Dynamic (custom icons), 2 = Static (original icon), 3 = Static (custom icon)</description>
+        </key>
+        <key name="panel-icon-custom-static" type="s">
+            <default>"flower.png"</default>
+            <summary>Custom static panel icon filename</summary>
+            <description>Filename of custom static icon (e.g., "flower.png"). Place in extension/icons/ directory.</description>
+        </key>
+        <key name="panel-icon-custom-dynamic-wallpaper" type="s">
+            <default>"wallpaper.png"</default>
+            <summary>Custom dynamic icon for wallpaper enabled</summary>
+            <description>Filename of icon to show when wallpaper is enabled (e.g., "wallpaper.png"). Place in extension/icons/ directory.</description>
+        </key>
+        <key name="panel-icon-custom-dynamic-lockscreen" type="s">
+            <default>"lockscreen.png"</default>
+            <summary>Custom dynamic icon for lockscreen enabled</summary>
+            <description>Filename of icon to show when lockscreen is enabled (e.g., "lockscreen.png"). Place in extension/icons/ directory.</description>
+        </key>
+        <key name="panel-icon-custom-dynamic-both" type="s">
+            <default>"both.png"</default>
+            <summary>Custom dynamic icon for both enabled</summary>
+            <description>Filename of icon to show when both wallpaper and lockscreen are enabled (e.g., "both.png"). Place in extension/icons/ directory.</description>
+        </key>
+        <key name="panel-icon-custom-dynamic-none" type="s">
+            <default>"none.png"</default>
+            <summary>Custom dynamic icon for both disabled</summary>
+            <description>Filename of icon to show when both wallpaper and lockscreen are disabled (e.g., "none.png"). Place in extension/icons/ directory.</description>
         </key>
 
         <!-- Wallpaper settings -->
@@ -242,6 +279,16 @@
             <default>90</default>
             <summary>Wallpaper render quality (percentage of monitor resolution)</summary>
             <description>Lower values reduce GPU/CPU load but may look blurrier. 100 = native resolution, 75 = good balance, 50 = performance mode.</description>
+        </key>
+        <key name="wallpaper-disable-on-battery" type="b">
+            <default>true</default>
+            <summary>Disable wallpaper on battery power</summary>
+            <description>Automatically disable video wallpaper when the device is running on battery power. Helps conserve battery life on laptops.</description>
+        </key>
+        <key name="lockscreen-disable-on-battery" type="b">
+            <default>true</default>
+            <summary>Disable lock screen video on battery power</summary>
+            <description>Automatically disable lock screen video when the device is running on battery power. Helps conserve battery life on laptops.</description>
         </key>
     </schema>
 </schemalist>
