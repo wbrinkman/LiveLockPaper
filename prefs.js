@@ -97,6 +97,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         });
         debugPage.add(this._buildPerfGroup(window));
         debugPage.add(this._buildDebugGroup(window));
+        debugPage.add(this._buildPanelIconGroup(window));
         window.add(debugPage);
     }
 
@@ -196,14 +197,14 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                         loopSwitch.subtitle = 'Continuously replay the video when it ends';
                     }
                 } else {
-                    const paths = window._settings.get_strv(Keys.VIDEO_PATHS);
-                    const count = paths && Array.isArray(paths) ? paths.length : 0;
-                    if (count > 1) {
-                        loopSwitch.set_sensitive(false);
-                        loopSwitch.subtitle = 'Not applicable — multiple videos always cycle through the playlist automatically';
-                    } else {
-                        loopSwitch.set_sensitive(true);
-                        loopSwitch.subtitle = 'Continuously replay the video when it ends';
+                const paths = window._settings.get_strv(Keys.VIDEO_PATHS);
+                const count = paths && Array.isArray(paths) ? paths.length : 0;
+                if (count > 1) {
+                    loopSwitch.set_sensitive(false);
+                    loopSwitch.subtitle = 'Not applicable — multiple videos always cycle through the playlist automatically';
+                } else {
+                    loopSwitch.set_sensitive(true);
+                    loopSwitch.subtitle = 'Continuously replay the video when it ends';
                     }
                 }
             } catch (e) {
@@ -218,6 +219,18 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         generalGroup.add(loopSwitch);
         generalGroup.add(volumeRow);
         generalGroup.add(scalingRow);
+
+        if (this._hasBatteryDevice()) {
+            const batterySwitch = new Adw.SwitchRow({
+                title: 'Disable on battery',
+                subtitle: 'Disable lock screen video while on battery.',
+            });
+            window._settings.bind(
+                Keys.LOCKSCREEN_DISABLE_ON_BATTERY, batterySwitch,
+                'active', Gio.SettingsBindFlags.DEFAULT
+            );
+            generalGroup.add(batterySwitch);
+        }
 
         return generalGroup;
     }
@@ -466,15 +479,26 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         );
         group.add(gtk4SinkSwitch);
 
-        const pauseHiddenSwitch = new Adw.SwitchRow({
-            title: 'Pause wallpaper when hidden',
-            subtitle: 'Pause playback when all monitors are fully covered by windows.',
+        const pauseWhenHiddenRow = new Adw.ComboRow({
+            title: 'Pause when hidden',
+            subtitle: 'Pause wallpaper when monitors are covered by fullscreen windows',
+            model: new Gtk.StringList({
+                strings: ['Off', 'All monitors', 'Any monitor']
+            }),
         });
-        window._settings.bind(
-            Keys.DEBUG_PAUSE_WHEN_HIDDEN, pauseHiddenSwitch,
-            'active', Gio.SettingsBindFlags.DEFAULT
-        );
-        group.add(pauseHiddenSwitch);
+        const currentMode = window._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? 1;
+        pauseWhenHiddenRow.set_selected(currentMode);
+        pauseWhenHiddenRow.connect('notify::selected', row => {
+            window._settings.set_int(Keys.PAUSE_WHEN_HIDDEN_MODE, row.selected);
+        });
+        // Listen for external changes (e.g., from panel menu) to update dropdown
+        window._settings.connect(`changed::${Keys.PAUSE_WHEN_HIDDEN_MODE}`, () => {
+            const mode = window._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? 1;
+            if (pauseWhenHiddenRow.get_selected() !== mode) {
+                pauseWhenHiddenRow.set_selected(mode);
+            }
+        });
+        group.add(pauseWhenHiddenRow);
 
         const adaptivePollingSwitch = new Adw.SwitchRow({
             title: 'Adaptive frame polling',
@@ -505,18 +529,6 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             'active', Gio.SettingsBindFlags.DEFAULT
         );
         group.add(gpuCCSwitch);
-
-        if (this._hasBatteryDevice()) {
-            const batterySwitch = new Adw.SwitchRow({
-                title: 'Disable on battery',
-                subtitle: 'Disable wallpaper and lock screen video while on battery.',
-            });
-            window._settings.bind(
-                Keys.DISABLE_ON_BATTERY, batterySwitch,
-                'active', Gio.SettingsBindFlags.DEFAULT
-            );
-            group.add(batterySwitch);
-        }
 
         const hwDecoderDefaultSubtitle = 'Prefer VA-API/NVDEC over software decoding when available.';
         const gpuCCDefaultSubtitle = 'Use OpenGL for YUV to BGRA conversion (appsink path only).';
@@ -608,8 +620,8 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         window._settings.connect(`changed::${Keys.DEBUG_USE_GTK4_SINK}`, updateSkipFrameSensitivity);
 
         const helperLogsSwitch = new Adw.SwitchRow({
-            title: 'Verbose GTK helper logs',
-            subtitle: 'Extra GTK4 helper window logs for dock/stacking troubleshooting.',
+            title: 'Verbose logging',
+            subtitle: 'Detailed logs for GTK helper windows, sleep/wake events, and state changes',
         });
         window._settings.bind(
             Keys.DEBUG_GTK_HELPER_LOGS, helperLogsSwitch,
@@ -715,6 +727,28 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
         debugGroup.add(logExpander);
         return debugGroup;
+    }
+
+    _buildPanelIconGroup(window) {
+        let iconGroup = new Adw.PreferencesGroup({
+            title: 'Panel Icon',
+        });
+
+        // Icon selection dropdown
+        const iconModeRow = new Adw.ComboRow({
+            title: 'Change Icon',
+            subtitle: 'Select how the panel icon is displayed',
+            model: new Gtk.StringList({
+                strings: ['Dynamic (Standard Icons)', 'Dynamic (Custom Icons)', 'Static (Original Icon)', 'Static (Custom Icon)']
+            }),
+        });
+        iconModeRow.set_selected(window._settings.get_int(Keys.PANEL_ICON_MODE));
+        iconModeRow.connect('notify::selected', row => {
+            window._settings.set_int(Keys.PANEL_ICON_MODE, row.selected);
+        });
+        iconGroup.add(iconModeRow);
+
+        return iconGroup;
     }
 
     _buildPathRow(window) {
@@ -1896,34 +1930,30 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             }
 
             if (videoFiles.length > 0) {
+                const replacementPaths = [...new Set(videoFiles.filter(Boolean))];
                 let currentPaths = [];
                 try {
                     currentPaths = window._settings.get_strv(Keys.VIDEO_PATHS);
-                    if (!currentPaths || !Array.isArray(currentPaths)) {
+                    if (!currentPaths || !Array.isArray(currentPaths))
                         currentPaths = [];
-                    }
                 } catch (e) {
                     currentPaths = [];
                 }
 
-                let added = false;
-                videoFiles.forEach(newPath => {
-                    if (!currentPaths.includes(newPath)) {
-                        currentPaths.push(newPath);
-                        added = true;
-                    }
-                });
+                const changed = currentPaths.length !== replacementPaths.length
+                    || currentPaths.some((p, i) => p !== replacementPaths[i]);
 
-                if (added) {
+                if (changed) {
                     try {
-                        window._settings.set_strv(Keys.VIDEO_PATHS, currentPaths);
-                        // Detect metadata for new videos
-                        this._updateVideoMetadata(currentPaths, window);
-                        if (updateCallback) updateCallback();
+                        window._settings.set_strv(Keys.VIDEO_PATHS, replacementPaths);
                     } catch (e) {
                         console.log('Could not save video paths:', e);
+                        return;
                     }
                 }
+
+                this._updateVideoMetadata(replacementPaths, window);
+                if (updateCallback) updateCallback();
             } else {
                 console.log('No video files found in selected folder');
             }
@@ -2775,7 +2805,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         });
     }
 
-    // Scan a folder and append supported video files.
+    // Scan a folder and replace the current list with supported video files.
     _scanGenericFolderForVideos(folderPath, getPaths, setPaths, window, metadataKey, updateCallback) {
         try {
             const folder = Gio.File.new_for_path(folderPath);
@@ -2792,19 +2822,16 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 }
             }
             if (videoFiles.length > 0) {
-                let paths = getPaths();
-                let added = false;
-                videoFiles.forEach(newPath => {
-                    if (!paths.includes(newPath)) {
-                        paths.push(newPath);
-                        added = true;
-                    }
-                });
-                if (added) {
-                    setPaths(paths);
-                    this._updateVideoMetadata(paths, window, metadataKey, updateCallback);
-                    if (updateCallback) updateCallback();
-                }
+                const replacementPaths = [...new Set(videoFiles.filter(Boolean))];
+                const currentPaths = getPaths();
+                const changed = currentPaths.length !== replacementPaths.length
+                    || currentPaths.some((p, i) => p !== replacementPaths[i]);
+
+                if (changed)
+                    setPaths(replacementPaths);
+
+                this._updateVideoMetadata(replacementPaths, window, metadataKey, updateCallback);
+                if (updateCallback) updateCallback();
             }
         } catch (e) {
             console.log(`Error scanning folder: ${e}`);
@@ -2895,6 +2922,18 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         window._settings.connect('changed::' + Keys.WALLPAPER_PER_MONITOR_CONFIG, updateLoopSensitivity);
         group.add(randomOrderSwitch);
         group.add(loopSwitch);
+
+        if (this._hasBatteryDevice()) {
+            const batterySwitch = new Adw.SwitchRow({
+                title: 'Disable on battery',
+                subtitle: 'Disable wallpaper video while on battery.',
+            });
+            window._settings.bind(
+                Keys.WALLPAPER_DISABLE_ON_BATTERY, batterySwitch,
+                'active', Gio.SettingsBindFlags.DEFAULT
+            );
+            group.add(batterySwitch);
+        }
 
         // Sensitivity: disable controls when wallpaper is disabled
         function updateSensitivity() {
