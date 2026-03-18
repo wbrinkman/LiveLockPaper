@@ -6,7 +6,7 @@
 ---
 
 <p align="center">
-  <img src="icon.png" width="128" height="128" alt="LiveLockPaper icon">
+  <img src="icons/flower.png" width="128" height="128" alt="LiveLockPaper icon">
 </p>
 
 <h1 align="center">LiveLockPaper</h1>
@@ -28,29 +28,40 @@
 
 ---
 
-## 🚀 What's New in v1.0.0
+## What's New in v2.0.0?
 
-### ✅ Initial Release Highlights
+### 🐛 **Bug Fixes**
+- **Window positioning** – Improved window positioning and helper window handling across multiple monitors
+- **Sleep/wake blocking** – Fixed video processes blocking system sleep by properly destroying lockscreen videos on sleep and pausing wallpaper videos
 
-- **GTK4 renderer by default** for high-performance video wallpaper and lock screen playback.
-- **Video wallpaper + lock screen in one extension** with per-monitor playback support.
-- **Stable multi-monitor behavior on Wayland**, including dock visibility after unlock.
-- **Legacy appsink fallback in Debug settings** for compatibility testing and troubleshooting.
-- **GStreamer init safety fix** using `Gst.init_check([])` for robust startup behavior.
+### ✨ **Enhancements**
+- **Panel icon customization** – Dynamic icons that change based on wallpaper/lockscreen state (standard GNOME icons or custom icons), or static custom icons
+- **Enhanced panel menu** – Organized submenus for wallpaper and lockscreen settings
+- **Separate battery controls** – Independent battery disable options for lockscreen and wallpaper (enabled by default to save battery)
+- **Enhanced pause when hidden** – Three modes: Off, All monitors covered, or Any monitor covered
+- **Improved sleep/wake handling** – Enhanced video pause/resume during system sleep/wake cycles (lockscreen is destroyed/recreated, wallpaper is paused/resumed)
+- **Verbose logging** – Enhanced debug logging for troubleshooting (GTK helper windows, sleep/wake events, state changes)
+- **Folder scanning improvement** – When scanning a folder for videos, the extension now replaces the current video list instead of appending to it, preventing duplicate entries
+- **Grayscale prompt** – Option to enable grayscale effect on password prompt
 
-### 🎬 Core Capabilities
+---
+
+## 🚀 Features
 
 - **🎥 Video Lock Screen + Desktop Wallpaper** — Use videos on lock screen and desktop.
 - **🖥️ Per-Monitor Playback** — Assign videos per display with playlist support.
 - **🎶 Multi-Video Playlists** — Add files/folders, then play sequentially or randomly.
 - **📊 Auto FPS Detection** — Uses source framerate automatically for smoother playback.
 - **🎨 Flexible Scaling** — Cover, fit, or stretch to match your layout.
-- **🌫️ Blur + Prompt Effects** — Adjustable blur/brightness and password prompt behavior.
+- **🌫️ Blur + Prompt Effects** — Adjustable blur/brightness and password prompt behavior (including grayscale option).
 - **🔊 Optional Audio** — Volume control with fade-in/out support.
 - **📑 Full Preferences UI** — Separate Lock Screen, Wallpaper, and Debug tabs.
 - **📌 Top Bar Quick Controls** — Play/pause, next video, restart, settings, and quick toggles from the panel menu.
 - **🖼️ Thumbnail + Metadata Tools** — Video previews, metadata display, and quick preview.
 - **✅ Startup Validation** — Missing videos are removed automatically on startup.
+- **💤 Sleep/Wake Support** — Automatic pause/resume during system sleep and wake cycles.
+- **🎨 Dynamic Panel Icons** — Panel icon automatically reflects current wallpaper/lockscreen state.
+- **🔋 Battery Optimization** — Separate battery disable options for lockscreen and wallpaper to save power.
 
 ---
 
@@ -59,17 +70,22 @@
 These defaults are aimed at sensible behavior out of the box:
 
 - **Top bar quick-controls button:** enabled
+- **Panel icon mode:** Dynamic (standard GNOME icons)
 - **Lock screen video:** enabled
 - **Lock screen random order:** enabled
 - **Lock screen auto FPS:** enabled
 - **Change blur on password prompt:** enabled
+- **Grayscale prompt:** disabled
+- **Lock screen disable on battery:** enabled (saves battery on laptops)
 - **Video wallpaper:** disabled (you can enable it any time)
 - **Wallpaper random order:** enabled
 - **Wallpaper auto FPS:** enabled
 - **Wallpaper per-monitor mode:** enabled
 - **Wallpaper render quality:** `90%`
+- **Wallpaper disable on battery:** enabled (saves battery on laptops)
+- **Pause wallpaper when hidden:** Any monitor (pauses when any monitor is covered)
 - **Force legacy appsink renderer:** disabled (GTK4 renderer path remains default)
-- **Pause wallpaper when hidden:** enabled
+- **Verbose logging:** disabled (enable for troubleshooting)
 
 ---
 
@@ -85,7 +101,8 @@ These defaults are aimed at sensible behavior out of the box:
   <p align="center"><img src="screenshots/lockscreen-window.png" alt="Lockscreen settings window" height="360"></p>
   <p align="center"><img src="screenshots/wallpaper-window.png" alt="Wallpaper settings window" height="360"></p>
   <p align="center"><img src="screenshots/debug-window.png" alt="Debug settings window" height="360"></p>
-  <p align="center"><img src="screenshots/panel-settings.png" alt="Top bar panel quick controls menu" height="360"></p>
+  <p align="center"><img src="screenshots/panel-settings-1.png" alt="Top bar panel quick controls menu - main" height="360"></p>
+  <p align="center"><img src="screenshots/panel-settings-2.png" alt="Top bar panel quick controls menu - wallpaper submenu" height="360"></p>
 </details>
 
 ---
@@ -113,7 +130,7 @@ These defaults are aimed at sensible behavior out of the box:
    ```
 
 3. Log out and back in (or restart GNOME Shell), then enable:
-   ```bash
+  ```bash
    gnome-extensions enable live-lockpaper@DeLuca21
    ```
 
@@ -156,17 +173,48 @@ sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0
 - The Debug menu includes an option to force the legacy appsink renderer for comparison and troubleshooting.
 - Some debug/performance toggles are appsink-only and are dynamically disabled while GTK4 mode is active.
 - In multi-monitor wallpaper mode on Wayland, helper windows are kept internal and pinned for window-manager stability to keep the secondary-monitor dock visible after unlock.
+- Helper windows use improved skip_taskbar handling for better dock compatibility on Wayland.
+
+## 🎨 Panel Icon Customization
+
+The extension supports dynamic and static panel icons:
+
+- **Dynamic (Standard Icons):** Uses standard GNOME icons that change based on wallpaper/lockscreen state
+- **Dynamic (Custom Icons):** Uses custom icons from the `icons/` directory that change based on state
+- **Static (Original Icon):** Always shows the original extension icon
+- **Static (Custom Icon):** Always shows a custom icon from the `icons/` directory
+
+For custom icons, place your icon files in the extension's `icons/` directory and configure the filenames in Debug settings.
+
+## 💤 Sleep/Wake Behavior
+
+The extension has been improved to better handle system sleep and wake cycles:
+
+- **Lockscreen:** Video is destroyed on sleep and recreated on wake if the system is still locked (prevents blocking sleep)
+- **Wallpaper:** Video is paused on sleep and resumed on wake when returning to desktop mode
+- This prevents video playback from blocking system sleep and ensures proper behavior after wake
+
+## ⏸️ Pause When Hidden Modes
+
+The "Pause when hidden" feature now supports three modes:
+
+- **Off:** Never pause wallpaper playback
+- **All monitors:** Pause when all monitors are fully covered by fullscreen/maximized windows
+- **Any monitor:** Pause when any monitor is fully covered by a fullscreen/maximized window
+
+This helps save CPU/GPU resources when the wallpaper isn't visible.
 
 ---
 
 ## ⚠️ Known Issues
 
-- Possible audio and video desync after suspend/wake.
+- Possible audio and video desync after suspend/wake (improved with sleep/wake handling).
 - Brief green frame at video start — enable **"Skip first frame"** in Debug settings to fix.
 - Possible clicking/crackling sounds when pausing/playing video with audio.
 - Performance issues and shell crashes with high-res videos (hardware dependent).
 - **Video wallpaper** uses GPU/CPU continuously — higher framerates and per-monitor mode use more resources.
 - Most settings apply immediately; a few session-level changes may still need an extension reload.
+- Window positioning may need adjustment when settings window is on a different monitor (work in progress).
 
 ---
 
