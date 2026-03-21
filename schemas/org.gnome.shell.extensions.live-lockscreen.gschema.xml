@@ -290,5 +290,145 @@
             <summary>Disable lock screen video on battery power</summary>
             <description>Automatically disable lock screen video when the device is running on battery power. Helps conserve battery life on laptops.</description>
         </key>
+        <key name="lockscreen-text-customize-enabled" type="b">
+            <default>false</default>
+            <summary>Customize lock screen text style</summary>
+            <description>Apply custom styles and formats to lock screen time, date, and hint labels.</description>
+        </key>
+        <key name="lockscreen-text-hide-cmd" type="b">
+            <default>false</default>
+            <summary>Hide lock screen command output text</summary>
+        </key>
+        <key name="lockscreen-text-hide-time" type="b">
+            <default>false</default>
+            <summary>Hide lock screen time text</summary>
+        </key>
+        <key name="lockscreen-text-hide-date" type="b">
+            <default>false</default>
+            <summary>Hide lock screen date text</summary>
+        </key>
+        <key name="lockscreen-text-hide-hint" type="b">
+            <default>false</default>
+            <summary>Hide lock screen hint text</summary>
+            <description>Hide the lock screen hint label when custom text styling is enabled.</description>
+        </key>
+        <key name="lockscreen-text-cmd-size" type="i">
+            <range min="10" max="96" />
+            <default>48</default>
+            <summary>Lock screen command output font size</summary>
+        </key>
+        <key name="lockscreen-text-time-size" type="i">
+            <range min="12" max="240" />
+            <default>96</default>
+            <summary>Lock screen time font size</summary>
+        </key>
+        <key name="lockscreen-text-date-size" type="i">
+            <range min="10" max="160" />
+            <default>28</default>
+            <summary>Lock screen date font size</summary>
+        </key>
+        <key name="lockscreen-text-hint-size" type="i">
+            <range min="10" max="96" />
+            <default>20</default>
+            <summary>Lock screen hint font size</summary>
+        </key>
+        <key name="lockscreen-text-cmd-color" type="s">
+            <default>"#D7CB8F"</default>
+            <summary>Lock screen command output text color</summary>
+        </key>
+        <key name="lockscreen-text-time-color" type="s">
+            <default>"#8ED78F"</default>
+            <summary>Lock screen time text color</summary>
+        </key>
+        <key name="lockscreen-text-date-color" type="s">
+            <default>"#F2675D"</default>
+            <summary>Lock screen date text color</summary>
+        </key>
+        <key name="lockscreen-text-hint-color" type="s">
+            <default>"#BEDA77"</default>
+            <summary>Lock screen hint text color</summary>
+        </key>
+        <key name="lockscreen-text-cmd-font" type="s">
+            <default>""</default>
+            <summary>Lock screen command output font family</summary>
+        </key>
+        <key name="lockscreen-text-time-font" type="s">
+            <default>""</default>
+            <summary>Lock screen time font family</summary>
+            <description>Optional font-family value for lock screen time text. Empty uses default GNOME font.</description>
+        </key>
+        <key name="lockscreen-text-date-font" type="s">
+            <default>""</default>
+            <summary>Lock screen date font family</summary>
+            <description>Optional font-family value for lock screen date text. Empty uses default GNOME font.</description>
+        </key>
+        <key name="lockscreen-text-hint-font" type="s">
+            <default>""</default>
+            <summary>Lock screen hint font family</summary>
+            <description>Optional font-family value for lock screen hint text. Empty uses default GNOME font.</description>
+        </key>
+        <key name="lockscreen-text-cmd-weight" type="s">
+            <default>""</default>
+            <summary>Lock screen command output font weight</summary>
+        </key>
+        <key name="lockscreen-text-time-weight" type="s">
+            <default>""</default>
+            <summary>Lock screen time font weight</summary>
+        </key>
+        <key name="lockscreen-text-date-weight" type="s">
+            <default>""</default>
+            <summary>Lock screen date font weight</summary>
+        </key>
+        <key name="lockscreen-text-hint-weight" type="s">
+            <default>""</default>
+            <summary>Lock screen hint font weight</summary>
+        </key>
+        <key name="lockscreen-text-cmd-style" type="s">
+            <default>""</default>
+            <summary>Lock screen command output font style</summary>
+        </key>
+        <key name="lockscreen-text-time-style" type="s">
+            <default>""</default>
+            <summary>Lock screen time font style</summary>
+        </key>
+        <key name="lockscreen-text-date-style" type="s">
+            <default>""</default>
+            <summary>Lock screen date font style</summary>
+        </key>
+        <key name="lockscreen-text-hint-style" type="s">
+            <default>""</default>
+            <summary>Lock screen hint font style</summary>
+        </key>
+        <key name="lockscreen-text-time-format" type="s">
+            <default>""</default>
+            <summary>Custom lock screen time format</summary>
+            <description>strftime format for time text. Leave empty to use GNOME default.</description>
+        </key>
+        <key name="lockscreen-text-date-format" type="s">
+            <default>""</default>
+            <summary>Custom lock screen date format</summary>
+            <description>strftime format for date text. Leave empty to use GNOME default.</description>
+        </key>
+        <key name="lockscreen-text-cmd-command" type="s">
+            <default>""</default>
+            <summary>Shell command for extra lock screen text line</summary>
+            <description>Optional shell command. Stdout is shown as a separate line above time/date/hint labels.</description>
+        </key>
+        <key name="lockscreen-keep-awake-enabled" type="b">
+            <default>false</default>
+            <summary>Keep lock screen visible after locking</summary>
+            <description>Prevents immediate lock screen blanking so lock screen wallpaper stays visible.</description>
+        </key>
+        <key name="lockscreen-keep-awake-timeout-seconds" type="i">
+            <range min="0" max="3600" />
+            <default>0</default>
+            <summary>Seconds until lock screen can blank</summary>
+            <description>0 means never force blank from this feature.</description>
+        </key>
+        <key name="lockscreen-keep-awake-only-on-ac" type="b">
+            <default>true</default>
+            <summary>Only keep lock screen visible on AC power</summary>
+            <description>When enabled, keep-awake behavior is disabled while running on battery.</description>
+        </key>
     </schema>
 </schemalist>
