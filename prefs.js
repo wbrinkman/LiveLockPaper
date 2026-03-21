@@ -27,14 +27,16 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             title: 'Lock Screen',
             icon_name: 'system-lock-screen-symbolic',
         });
-        lockScreenPage.add(this._buildGeneralGroup(window));
+        const lockScreenSectionsGroup = new Adw.PreferencesGroup();
+        lockScreenPage.add(lockScreenSectionsGroup);
+        lockScreenSectionsGroup.add(this._buildGeneralGroup(window));
 
         // Lock screen per-monitor video groups
         const lsSingleVideoGroup = this._buildLockscreenSingleVideoGroup(window);
-        lockScreenPage.add(lsSingleVideoGroup);
+        lockScreenSectionsGroup.add(lsSingleVideoGroup);
 
         const lsPerMonitorGroup = this._buildLockscreenPerMonitorGroup(window);
-        lockScreenPage.add(lsPerMonitorGroup);
+        lockScreenSectionsGroup.add(lsPerMonitorGroup);
 
         // Toggle visibility based on per-monitor setting
         const updateLsGroupVisibility = () => {
@@ -46,9 +48,13 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         window._settings.connect('changed::' + Keys.LOCKSCREEN_PER_MONITOR, updateLsGroupVisibility);
 
         const lsAppearanceGroup = this._buildAppearanceGroup(window);
-        lockScreenPage.add(lsAppearanceGroup);
+        lockScreenSectionsGroup.add(lsAppearanceGroup);
         const lsPromptGroup = this._buildPromptGroup(window);
-        lockScreenPage.add(lsPromptGroup);
+        lockScreenSectionsGroup.add(lsPromptGroup);
+        const lsTextGroup = this._buildLockscreenTextGroup(window);
+        lockScreenSectionsGroup.add(lsTextGroup);
+        const lsKeepAwakeGroup = this._buildLockscreenKeepAwakeGroup(window);
+        lockScreenSectionsGroup.add(lsKeepAwakeGroup);
 
         // Disable lockscreen-specific groups when lock screen video is off.
         const updateLockscreenSensitivity = () => {
@@ -57,6 +63,8 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             lsPerMonitorGroup.set_sensitive(enabled);
             lsAppearanceGroup.set_sensitive(enabled);
             lsPromptGroup.set_sensitive(enabled);
+            lsTextGroup.set_sensitive(enabled);
+            lsKeepAwakeGroup.set_sensitive(enabled);
         };
         updateLockscreenSensitivity();
         window._settings.connect('changed::' + Keys.LOCKSCREEN_ENABLED, updateLockscreenSensitivity);
@@ -67,17 +75,19 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             title: 'Wallpaper',
             icon_name: 'preferences-desktop-wallpaper-symbolic',
         });
+        const wallpaperSectionsGroup = new Adw.PreferencesGroup();
+        wallpaperPage.add(wallpaperSectionsGroup);
 
         const wpControlGroup = this._buildWallpaperControlGroup(window);
-        wallpaperPage.add(wpControlGroup);
+        wallpaperSectionsGroup.add(wpControlGroup);
 
         const wpSingleVideoGroup = this._buildWallpaperSingleVideoGroup(window);
-        wallpaperPage.add(wpSingleVideoGroup);
+        wallpaperSectionsGroup.add(wpSingleVideoGroup);
 
         const wpPerMonitorGroup = this._buildWallpaperPerMonitorGroup(window);
-        wallpaperPage.add(wpPerMonitorGroup);
+        wallpaperSectionsGroup.add(wpPerMonitorGroup);
 
-        wallpaperPage.add(this._buildWallpaperAppearanceGroup(window));
+        wallpaperSectionsGroup.add(this._buildWallpaperAppearanceGroup(window));
 
         // Toggle visibility of single vs per-monitor groups
         const updateWpGroupVisibility = () => {
@@ -95,15 +105,19 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             title: 'Debug',
             icon_name: 'applications-utilities-symbolic',
         });
-        debugPage.add(this._buildPerfGroup(window));
-        debugPage.add(this._buildDebugGroup(window));
-        debugPage.add(this._buildPanelIconGroup(window));
+        const debugSectionsGroup = new Adw.PreferencesGroup();
+        debugPage.add(debugSectionsGroup);
+        debugSectionsGroup.add(this._buildPerfGroup(window));
+        // Place Panel Icon above Debug per request
+        debugSectionsGroup.add(this._buildPanelIconGroup(window));
+        debugSectionsGroup.add(this._buildDebugGroup(window));
         window.add(debugPage);
     }
 
     _buildGeneralGroup(window) {
-        let generalGroup = new Adw.PreferencesGroup({
+        let generalGroup = new Adw.ExpanderRow({
             title: 'General',
+            expanded: false,
         });
 
         const lockscreenEnabledSwitch = new Adw.SwitchRow({
@@ -114,7 +128,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.LOCKSCREEN_ENABLED, lockscreenEnabledSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        generalGroup.add(lockscreenEnabledSwitch);
+        generalGroup.add_row(lockscreenEnabledSwitch);
 
         const scalingRow = new Adw.ComboRow({
             title: 'Scaling mode',
@@ -169,8 +183,8 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.LOCKSCREEN_PER_MONITOR, perMonitorSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        generalGroup.add(perMonitorSwitch);
-        generalGroup.add(randomOrderSwitch);
+        generalGroup.add_row(perMonitorSwitch);
+        generalGroup.add_row(randomOrderSwitch);
 
         const loopSwitch = new Adw.SwitchRow({
             title: 'Loop video',
@@ -216,9 +230,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         window._settings.connect('changed::' + Keys.LOCKSCREEN_PER_MONITOR, updateLoopSensitivity);
         window._settings.connect('changed::' + Keys.LOCKSCREEN_PER_MONITOR_CONFIG, updateLoopSensitivity);
 
-        generalGroup.add(loopSwitch);
-        generalGroup.add(volumeRow);
-        generalGroup.add(scalingRow);
+        generalGroup.add_row(loopSwitch);
+        generalGroup.add_row(volumeRow);
+        generalGroup.add_row(scalingRow);
 
         if (this._hasBatteryDevice()) {
             const batterySwitch = new Adw.SwitchRow({
@@ -229,15 +243,16 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 Keys.LOCKSCREEN_DISABLE_ON_BATTERY, batterySwitch,
                 'active', Gio.SettingsBindFlags.DEFAULT
             );
-            generalGroup.add(batterySwitch);
+            generalGroup.add_row(batterySwitch);
         }
 
         return generalGroup;
     }
 
     _buildAppearanceGroup(window) {
-        let appearanceGroup = new Adw.PreferencesGroup({
+        let appearanceGroup = new Adw.ExpanderRow({
             title: 'Appearance',
+            expanded: false,
         });
 
         // Auto-detect FPS toggle
@@ -249,7 +264,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.VIDEO_AUTO_FPS, autoFpsSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        appearanceGroup.add(autoFpsSwitch);
+        appearanceGroup.add_row(autoFpsSwitch);
 
         let fpsRow = new Adw.SpinRow({
             title: 'Framerate',
@@ -278,7 +293,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         });
         fpsRow.add_suffix(fpsSuffix);
 
-        appearanceGroup.add(fpsRow);
+        appearanceGroup.add_row(fpsRow);
 
 
         let fadeInRow = new Adw.SpinRow({
@@ -301,7 +316,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         fadeInRow.connect('notify::value', row => {
             window._settings.set_int(Keys.FADE_IN_DURATION, row.get_value());
         });
-        appearanceGroup.add(fadeInRow);
+        appearanceGroup.add_row(fadeInRow);
 
         let blurRadiusRow = new Adw.SpinRow({
             title: 'Blur radius',
@@ -318,7 +333,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             css_classes: ['dim-label'],
         });
         blurRadiusRow.add_suffix(radiusSuffix);
-        appearanceGroup.add(blurRadiusRow);
+        appearanceGroup.add_row(blurRadiusRow);
 
         let blurBrightnessRow = new Adw.SpinRow({
             title: 'Blur brightness',
@@ -335,7 +350,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             css_classes: ['dim-label'],
         });
         blurBrightnessRow.add_suffix(brightnessSuffix);
-        appearanceGroup.add(blurBrightnessRow);
+        appearanceGroup.add_row(blurBrightnessRow);
 
         const toggleBrightnessSpin = () => {
             blurBrightnessRow.set_sensitive(blurRadiusRow.get_value() !== 0);
@@ -355,9 +370,10 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
     }
 
     _buildPromptGroup(window) {
-        let promptGroup = new Adw.PreferencesGroup({
+        let promptGroup = new Adw.ExpanderRow({
             title: 'Password Prompt',
-            description: 'Customize behavior when password prompt appears',
+            subtitle: 'Customize behavior when password prompt appears',
+            expanded: false,
         });
 
         const pauseSwitch = new Adw.SwitchRow({
@@ -367,7 +383,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.PROMPT_PAUSE, pauseSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        promptGroup.add(pauseSwitch);
+        promptGroup.add_row(pauseSwitch);
 
         const changeBlurSwitch = new Adw.SwitchRow({
             title: 'Change blur'
@@ -376,7 +392,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.PROMPT_CHANGE_BLUR, changeBlurSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        promptGroup.add(changeBlurSwitch);
+        promptGroup.add_row(changeBlurSwitch);
 
         const blurRadiusRow = new Adw.SpinRow({
             title: 'Blur radius',
@@ -398,7 +414,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.PROMPT_BLUR_RADIUS, blurRadiusRow,
             'value', Gio.SettingsBindFlags.DEFAULT
         );
-        promptGroup.add(blurRadiusRow);
+        promptGroup.add_row(blurRadiusRow);
 
         const blurBrightnessRow = new Adw.SpinRow({
             title: 'Blur brightness',
@@ -418,7 +434,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             css_classes: ['dim-label'],
         });
         blurBrightnessRow.add_suffix(suffix);
-        promptGroup.add(blurBrightnessRow);
+        promptGroup.add_row(blurBrightnessRow);
 
         const animDurationRow = new Adw.SpinRow({
             title: 'Animation duration',
@@ -439,7 +455,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             css_classes: ['dim-label'],
         });
         animDurationRow.add_suffix(animSuffix);
-        promptGroup.add(animDurationRow);
+        promptGroup.add_row(animDurationRow);
 
         const toggleBlurRows = () => {
             const enabled = changeBlurSwitch.active;
@@ -458,15 +474,453 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.PROMPT_GRAYSCALE, grayscaleSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        promptGroup.add(grayscaleSwitch);
+        promptGroup.add_row(grayscaleSwitch);
 
         return promptGroup;
     }
 
+    _buildLockscreenTextGroup(window) {
+        const group = new Adw.ExpanderRow({
+            title: 'Lock Screen Text',
+            subtitle: 'Customize lock screen labels.',
+            expanded: false,
+        });
+
+        const enabledSwitch = new Adw.SwitchRow({
+            title: 'Enable custom text styling',
+            subtitle: 'Apply custom fonts, colors, and optional time/date formats',
+        });
+        window._settings.bind(
+            Keys.LOCKSCREEN_TEXT_CUSTOMIZE_ENABLED, enabledSwitch,
+            'active', Gio.SettingsBindFlags.DEFAULT
+        );
+        group.add_row(enabledSwitch);
+
+        const cmdOutputRow = new Adw.ExpanderRow({
+            title: 'Cmd Output',
+            subtitle: 'Run one bash command and show stdout above time/date/hint',
+            expanded: false,
+        });
+        group.add_row(cmdOutputRow);
+
+        const timeRow = new Adw.ExpanderRow({
+            title: 'Time',
+            subtitle: 'Time label styling and format',
+            expanded: false,
+        });
+        group.add_row(timeRow);
+
+        const dateRow = new Adw.ExpanderRow({
+            title: 'Date',
+            subtitle: 'Date label styling and format',
+            expanded: false,
+        });
+        group.add_row(dateRow);
+
+        const hintRow = new Adw.ExpanderRow({
+            title: 'Hint',
+            subtitle: 'Unlock hint styling and visibility',
+            expanded: false,
+        });
+        group.add_row(hintRow);
+
+        const fontFamilyOptions = [['Default', ''], ...this._getFontFamilyOptions(window).map(name => [name, name])];
+        const weightOptions = [
+            ['Default', ''],
+            ['100', '100'],
+            ['200', '200'],
+            ['300', '300'],
+            ['400', '400'],
+            ['500', '500'],
+            ['600', '600'],
+            ['700', '700'],
+            ['800', '800'],
+            ['900', '900'],
+        ];
+        const styleOptions = [
+            ['Default', ''],
+            ['normal', 'normal'],
+            ['italic', 'italic'],
+            ['oblique', 'oblique'],
+        ];
+
+        const hideCmdSwitch = new Adw.SwitchRow({ title: 'Remove' });
+        window._settings.bind(Keys.LOCKSCREEN_TEXT_HIDE_CMD, hideCmdSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        const cmdColorRow = this._buildColorPickerRow(window, 'Color', Keys.LOCKSCREEN_TEXT_CMD_COLOR, true);
+        const cmdSizeRow = this._buildSpinRow(window, 'Font size', Keys.LOCKSCREEN_TEXT_CMD_SIZE, 10, 96, true);
+        const cmdFontRow = this._buildChoiceRow(window, 'Font family', Keys.LOCKSCREEN_TEXT_CMD_FONT, fontFamilyOptions);
+        const cmdWeightRow = this._buildChoiceRow(window, 'Font weight', Keys.LOCKSCREEN_TEXT_CMD_WEIGHT, weightOptions);
+        const cmdStyleRow = this._buildChoiceRow(window, 'Font style', Keys.LOCKSCREEN_TEXT_CMD_STYLE, styleOptions);
+        // Command row - build manually to get entry reference
+        const cmdCommandRow = new Adw.ActionRow({ title: 'Command' });
+        const cmdEntry = new Gtk.Entry({
+            valign: Gtk.Align.CENTER,
+            hexpand: true,
+            placeholder_text: 'Example: whoami or echo Hello!',
+            text: window._settings.get_string(Keys.LOCKSCREEN_TEXT_CMD_COMMAND),
+        });
+        cmdEntry.connect('changed', () => {
+            window._settings.set_string(Keys.LOCKSCREEN_TEXT_CMD_COMMAND, cmdEntry.get_text());
+        });
+        window._settings.connect(`changed::${Keys.LOCKSCREEN_TEXT_CMD_COMMAND}`, () => {
+            const value = window._settings.get_string(Keys.LOCKSCREEN_TEXT_CMD_COMMAND);
+            if (cmdEntry.get_text() !== value)
+                cmdEntry.set_text(value);
+        });
+        cmdCommandRow.add_suffix(cmdEntry);
+        cmdCommandRow.set_activatable_widget(cmdEntry);
+        
+        // Greeting preset row
+        const greetingPresetRow = new Adw.ActionRow({
+            title: 'Use Greeting Preset',
+            subtitle: 'Dynamically greet by time of day and username',
+        });
+        const applyGreetingButton = new Gtk.Button({
+            label: 'Apply',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['suggested-action'],
+        });
+        applyGreetingButton.connect('clicked', () => {
+            const preset = 'hour=$(date +%H); if [ "$hour" -lt 12 ]; then greeting="Morning"; elif [ "$hour" -lt 18 ]; then greeting="Afternoon"; else greeting="Evening"; fi; name=$(whoami); name=$(echo "$name" | awk \'{print toupper(substr($0,1,1)) substr($0,2)}\'); echo "Good $greeting $name"';
+            cmdEntry.set_text(preset);
+            cmdEntry.grab_focus();
+            cmdEntry.set_position(-1);
+            window._settings.set_string(Keys.LOCKSCREEN_TEXT_CMD_COMMAND, preset);
+        });
+        greetingPresetRow.add_suffix(applyGreetingButton);
+        greetingPresetRow.set_activatable_widget(applyGreetingButton);
+        cmdOutputRow.add_row(hideCmdSwitch);
+        cmdOutputRow.add_row(cmdColorRow);
+        cmdOutputRow.add_row(cmdSizeRow);
+        cmdOutputRow.add_row(cmdFontRow);
+        cmdOutputRow.add_row(cmdWeightRow);
+        cmdOutputRow.add_row(cmdStyleRow);
+        cmdOutputRow.add_row(cmdCommandRow);
+        cmdOutputRow.add_row(greetingPresetRow);
+
+        // End command row with inline preset
+
+        const hideTimeSwitch = new Adw.SwitchRow({ title: 'Remove' });
+        window._settings.bind(Keys.LOCKSCREEN_TEXT_HIDE_TIME, hideTimeSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        const timeColorRow = this._buildColorPickerRow(window, 'Color', Keys.LOCKSCREEN_TEXT_TIME_COLOR, true);
+        const timeSizeRow = this._buildSpinRow(window, 'Font size', Keys.LOCKSCREEN_TEXT_TIME_SIZE, 12, 240, true);
+        const timeFontRow = this._buildChoiceRow(window, 'Font family', Keys.LOCKSCREEN_TEXT_TIME_FONT, fontFamilyOptions);
+        const timeWeightRow = this._buildChoiceRow(window, 'Font weight', Keys.LOCKSCREEN_TEXT_TIME_WEIGHT, weightOptions);
+        const timeStyleRow = this._buildChoiceRow(window, 'Font style', Keys.LOCKSCREEN_TEXT_TIME_STYLE, styleOptions);
+        const timeFormatRow = this._buildTextEntryRow(window, 'Format', Keys.LOCKSCREEN_TEXT_TIME_FORMAT, 'Empty = GNOME default');
+        const timeFormatHelpRow = this._buildFormatHelpRow('Time format codes', 'https://docs.gtk.org/glib/method.DateTime.format.html');
+        timeRow.add_row(hideTimeSwitch);
+        timeRow.add_row(timeColorRow);
+        timeRow.add_row(timeSizeRow);
+        timeRow.add_row(timeFontRow);
+        timeRow.add_row(timeWeightRow);
+        timeRow.add_row(timeStyleRow);
+        timeRow.add_row(timeFormatRow);
+        timeRow.add_row(timeFormatHelpRow);
+
+        const hideDateSwitch = new Adw.SwitchRow({ title: 'Remove' });
+        window._settings.bind(Keys.LOCKSCREEN_TEXT_HIDE_DATE, hideDateSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        const dateColorRow = this._buildColorPickerRow(window, 'Color', Keys.LOCKSCREEN_TEXT_DATE_COLOR, true);
+        const dateSizeRow = this._buildSpinRow(window, 'Font size', Keys.LOCKSCREEN_TEXT_DATE_SIZE, 10, 160, true);
+        const dateFontRow = this._buildChoiceRow(window, 'Font family', Keys.LOCKSCREEN_TEXT_DATE_FONT, fontFamilyOptions);
+        const dateWeightRow = this._buildChoiceRow(window, 'Font weight', Keys.LOCKSCREEN_TEXT_DATE_WEIGHT, weightOptions);
+        const dateStyleRow = this._buildChoiceRow(window, 'Font style', Keys.LOCKSCREEN_TEXT_DATE_STYLE, styleOptions);
+        const dateFormatRow = this._buildTextEntryRow(window, 'Format', Keys.LOCKSCREEN_TEXT_DATE_FORMAT, 'Empty = GNOME default');
+        const dateFormatHelpRow = this._buildFormatHelpRow('Date format codes', 'https://docs.gtk.org/glib/method.DateTime.format.html');
+        dateRow.add_row(hideDateSwitch);
+        dateRow.add_row(dateColorRow);
+        dateRow.add_row(dateSizeRow);
+        dateRow.add_row(dateFontRow);
+        dateRow.add_row(dateWeightRow);
+        dateRow.add_row(dateStyleRow);
+        dateRow.add_row(dateFormatRow);
+        dateRow.add_row(dateFormatHelpRow);
+
+        const hideHintSwitch = new Adw.SwitchRow({ title: 'Remove' });
+        window._settings.bind(Keys.LOCKSCREEN_TEXT_HIDE_HINT, hideHintSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        const hintColorRow = this._buildColorPickerRow(window, 'Color', Keys.LOCKSCREEN_TEXT_HINT_COLOR, true);
+        const hintSizeRow = this._buildSpinRow(window, 'Font size', Keys.LOCKSCREEN_TEXT_HINT_SIZE, 10, 96, true);
+        const hintFontRow = this._buildChoiceRow(window, 'Font family', Keys.LOCKSCREEN_TEXT_HINT_FONT, fontFamilyOptions);
+        const hintWeightRow = this._buildChoiceRow(window, 'Font weight', Keys.LOCKSCREEN_TEXT_HINT_WEIGHT, weightOptions);
+        const hintStyleRow = this._buildChoiceRow(window, 'Font style', Keys.LOCKSCREEN_TEXT_HINT_STYLE, styleOptions);
+        hintRow.add_row(hideHintSwitch);
+        hintRow.add_row(hintColorRow);
+        hintRow.add_row(hintSizeRow);
+        hintRow.add_row(hintFontRow);
+        hintRow.add_row(hintWeightRow);
+        hintRow.add_row(hintStyleRow);
+
+        const updateSensitive = () => {
+            const enabled = enabledSwitch.get_active();
+            cmdCommandRow.set_sensitive(enabled);
+
+            timeRow.set_sensitive(enabled);
+            dateRow.set_sensitive(enabled);
+            hintRow.set_sensitive(enabled);
+            cmdOutputRow.set_sensitive(enabled);
+            hideCmdSwitch.set_sensitive(enabled);
+            hideTimeSwitch.set_sensitive(enabled);
+            hideDateSwitch.set_sensitive(enabled);
+            hideHintSwitch.set_sensitive(enabled);
+            cmdSizeRow.set_sensitive(enabled);
+            timeSizeRow.set_sensitive(enabled);
+            dateSizeRow.set_sensitive(enabled);
+            hintSizeRow.set_sensitive(enabled);
+            cmdColorRow.set_sensitive(enabled);
+            timeColorRow.set_sensitive(enabled);
+            dateColorRow.set_sensitive(enabled);
+            hintColorRow.set_sensitive(enabled);
+            cmdFontRow.set_sensitive(enabled);
+            timeFontRow.set_sensitive(enabled);
+            dateFontRow.set_sensitive(enabled);
+            hintFontRow.set_sensitive(enabled);
+            cmdWeightRow.set_sensitive(enabled);
+            timeWeightRow.set_sensitive(enabled);
+            dateWeightRow.set_sensitive(enabled);
+            hintWeightRow.set_sensitive(enabled);
+            cmdStyleRow.set_sensitive(enabled);
+            timeStyleRow.set_sensitive(enabled);
+            dateStyleRow.set_sensitive(enabled);
+            hintStyleRow.set_sensitive(enabled);
+            timeFormatRow.set_sensitive(enabled);
+            dateFormatRow.set_sensitive(enabled);
+        };
+        updateSensitive();
+        enabledSwitch.connect('notify::active', updateSensitive);
+
+        return group;
+    }
+
+    _buildLockscreenKeepAwakeGroup(window) {
+        const group = new Adw.ExpanderRow({
+            title: 'Keep awake',
+            subtitle: 'Keep lock screen visible after locking.',
+            expanded: false,
+        });
+        const hasBattery = this._hasBatteryDevice();
+
+        const enabledSwitch = new Adw.SwitchRow({
+            title: 'Enable keep-awake lock screen',
+        });
+        window._settings.bind(
+            Keys.LOCKSCREEN_KEEP_AWAKE_ENABLED, enabledSwitch,
+            'active', Gio.SettingsBindFlags.DEFAULT
+        );
+        group.add_row(enabledSwitch);
+
+        let onlyAcSwitch = null;
+        if (hasBattery) {
+            onlyAcSwitch = new Adw.SwitchRow({
+                title: 'Only keep awake when on AC',
+            });
+            window._settings.bind(
+                Keys.LOCKSCREEN_KEEP_AWAKE_ONLY_ON_AC, onlyAcSwitch,
+                'active', Gio.SettingsBindFlags.DEFAULT
+            );
+            group.add_row(onlyAcSwitch);
+        }
+
+        const timeoutValues = [0, 60, 300, 600, 900, 1800, 3600];
+        const timeoutLabels = ['Never', '1 min', '5 min', '10 min', '15 min', '30 min', '60 min'];
+        const timeoutRow = new Adw.ComboRow({
+            title: 'Timeout to blank after locking the screen',
+            model: new Gtk.StringList({
+                strings: timeoutLabels,
+            }),
+        });
+        const getTimeoutIndex = () => {
+            const value = window._settings.get_int(Keys.LOCKSCREEN_KEEP_AWAKE_TIMEOUT_SECONDS);
+            const idx = timeoutValues.indexOf(value);
+            return idx >= 0 ? idx : 0;
+        };
+        timeoutRow.set_selected(getTimeoutIndex());
+        timeoutRow.connect('notify::selected', row => {
+            const idx = row.get_selected();
+            if (idx < 0 || idx >= timeoutValues.length)
+                return;
+            window._settings.set_int(Keys.LOCKSCREEN_KEEP_AWAKE_TIMEOUT_SECONDS, timeoutValues[idx]);
+        });
+        window._settings.connect(`changed::${Keys.LOCKSCREEN_KEEP_AWAKE_TIMEOUT_SECONDS}`, () => {
+            const idx = getTimeoutIndex();
+            if (timeoutRow.get_selected() !== idx)
+                timeoutRow.set_selected(idx);
+        });
+        group.add_row(timeoutRow);
+
+        const updateSensitive = () => {
+            const enabled = enabledSwitch.get_active();
+            if (onlyAcSwitch)
+                onlyAcSwitch.set_sensitive(enabled);
+            timeoutRow.set_sensitive(enabled);
+        };
+        updateSensitive();
+        enabledSwitch.connect('notify::active', updateSensitive);
+
+        return group;
+    }
+
+    _buildColorPickerRow(window, title, key, includeReset = false) {
+        const row = new Adw.ActionRow({ title });
+        const dialog = new Gtk.ColorDialog({ with_alpha: false });
+        const button = new Gtk.ColorDialogButton({
+            dialog,
+            valign: Gtk.Align.CENTER,
+        });
+        const initialRgba = new Gdk.RGBA();
+        initialRgba.parse(window._settings.get_string(key));
+        button.set_rgba(initialRgba);
+
+        const entry = new Gtk.Entry({
+            valign: Gtk.Align.CENTER,
+            hexpand: false,
+            width_chars: 9,
+            placeholder_text: '#RRGGBB',
+            text: window._settings.get_string(key),
+        });
+
+        button.connect('notify::rgba', () => {
+            const rgba = button.get_rgba();
+            const hex = this._rgbaToHex(rgba);
+            entry.set_text(hex);
+            window._settings.set_string(key, hex);
+        });
+        entry.connect('changed', () => {
+            const text = entry.get_text().trim();
+            if (!/^#[0-9A-Fa-f]{6}$/.test(text))
+                return;
+            const upper = text.toUpperCase();
+            window._settings.set_string(key, upper);
+            const rgba = new Gdk.RGBA();
+            if (rgba.parse(upper))
+                button.set_rgba(rgba);
+        });
+        row.add_suffix(button);
+        row.add_suffix(entry);
+        if (includeReset)
+            row.add_suffix(this._buildResetButton(window, key, () => entry.set_text(window._settings.get_string(key))));
+        row.set_activatable_widget(button);
+        return row;
+    }
+
+    _buildSpinRow(window, title, key, lower, upper, includeReset = false) {
+        const row = new Adw.SpinRow({
+            title,
+            adjustment: new Gtk.Adjustment({
+                lower,
+                upper,
+                step_increment: 1,
+                value: window._settings.get_int(key),
+            }),
+        });
+        window._settings.bind(key, row, 'value', Gio.SettingsBindFlags.DEFAULT);
+        if (includeReset)
+            row.add_suffix(this._buildResetButton(window, key, () => row.set_value(window._settings.get_int(key))));
+        return row;
+    }
+
+    _buildResetButton(window, key, refreshCb) {
+        const button = new Gtk.Button({ label: 'Reset', valign: Gtk.Align.CENTER });
+        button.connect('clicked', () => {
+            window._settings.reset(key);
+            refreshCb();
+        });
+        return button;
+    }
+
+    _buildFormatHelpRow(title, uri) {
+        const row = new Adw.ActionRow({
+            title,
+            subtitle: 'Use strftime-style tokens (for example: %a %b %e, %H:%M)',
+        });
+        const link = new Gtk.LinkButton({
+            uri,
+            label: 'Format reference',
+            valign: Gtk.Align.CENTER,
+        });
+        row.add_suffix(link);
+        row.set_activatable_widget(link);
+        return row;
+    }
+
+    _rgbaToHex(rgba) {
+        const r = Math.round((rgba?.red ?? 1) * 255);
+        const g = Math.round((rgba?.green ?? 1) * 255);
+        const b = Math.round((rgba?.blue ?? 1) * 255);
+        const toHex = n => n.toString(16).padStart(2, '0').toUpperCase();
+        return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    }
+
+    _buildTextEntryRow(window, title, key, placeholder) {
+        const row = new Adw.ActionRow({ title });
+        const entry = new Gtk.Entry({
+            valign: Gtk.Align.CENTER,
+            hexpand: true,
+            placeholder_text: placeholder,
+            text: window._settings.get_string(key),
+        });
+        entry.connect('changed', () => {
+            window._settings.set_string(key, entry.get_text());
+        });
+        row.add_suffix(entry);
+        row.set_activatable_widget(entry);
+        return row;
+    }
+
+    _buildChoiceRow(window, title, key, options) {
+        const labels = options.map(([label]) => label);
+        const values = options.map(([, value]) => value);
+        const row = new Adw.ComboRow({
+            title,
+            model: new Gtk.StringList({ strings: labels }),
+        });
+
+        const getSelected = () => {
+            const current = window._settings.get_string(key);
+            const idx = values.indexOf(current);
+            return idx >= 0 ? idx : 0;
+        };
+
+        row.set_selected(getSelected());
+        row.connect('notify::selected', combo => {
+            const idx = combo.get_selected();
+            if (idx < 0 || idx >= values.length)
+                return;
+            window._settings.set_string(key, values[idx]);
+        });
+        window._settings.connect(`changed::${key}`, () => {
+            const idx = getSelected();
+            if (row.get_selected() !== idx)
+                row.set_selected(idx);
+        });
+
+        return row;
+    }
+
+    _getFontFamilyOptions(window) {
+        if (this._fontFamilyOptions)
+            return this._fontFamilyOptions;
+
+        let families = [];
+        try {
+            const context = typeof window.get_pango_context === 'function' ? window.get_pango_context() : null;
+            if (context && typeof context.list_families === 'function')
+                families = context.list_families().map(f => f.get_name()).filter(Boolean);
+        } catch (_) {}
+
+        if (!families.length) {
+            families = ['Cantarell', 'Adwaita Sans', 'Adwaita Mono', 'Sans', 'Monospace', 'Serif'];
+        }
+
+        families = [...new Set(families)].sort((a, b) => a.localeCompare(b));
+        this._fontFamilyOptions = families;
+        return families;
+    }
+
     _buildPerfGroup(window) {
-        const group = new Adw.PreferencesGroup({
+        const group = new Adw.ExpanderRow({
             title: 'Performance',
-            description: 'Performance and renderer options. Most changes apply after wallpaper restart.',
+            subtitle: 'Performance and renderer options. Most changes apply after wallpaper restart.',
+            expanded: false,
         });
 
         const gtk4SinkSwitch = new Adw.SwitchRow({
@@ -477,7 +931,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.DEBUG_USE_GTK4_SINK, gtk4SinkSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        group.add(gtk4SinkSwitch);
+        group.add_row(gtk4SinkSwitch);
 
         const pauseWhenHiddenRow = new Adw.ComboRow({
             title: 'Pause when hidden',
@@ -498,7 +952,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 pauseWhenHiddenRow.set_selected(mode);
             }
         });
-        group.add(pauseWhenHiddenRow);
+        group.add_row(pauseWhenHiddenRow);
 
         const adaptivePollingSwitch = new Adw.SwitchRow({
             title: 'Adaptive frame polling',
@@ -508,7 +962,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.DEBUG_PUSH_FRAME_DELIVERY, adaptivePollingSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        group.add(adaptivePollingSwitch);
+        group.add_row(adaptivePollingSwitch);
 
         const hwDecoderSwitch = new Adw.SwitchRow({
             title: 'Prefer hardware decoder',
@@ -518,7 +972,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.DEBUG_PREFER_HW_DECODER, hwDecoderSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        group.add(hwDecoderSwitch);
+        group.add_row(hwDecoderSwitch);
 
         const gpuCCSwitch = new Adw.SwitchRow({
             title: 'GPU colour conversion',
@@ -528,7 +982,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.DEBUG_GPU_COLOR_CONVERSION, gpuCCSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        group.add(gpuCCSwitch);
+        group.add_row(gpuCCSwitch);
 
         const hwDecoderDefaultSubtitle = 'Prefer VA-API/NVDEC over software decoding when available.';
         const gpuCCDefaultSubtitle = 'Use OpenGL for YUV to BGRA conversion (appsink path only).';
@@ -580,8 +1034,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
     }
 
     _buildDebugGroup(window) {
-        let debugGroup = new Adw.PreferencesGroup({
+        let debugGroup = new Adw.ExpanderRow({
             title: 'Debug',
+            expanded: false,
         });
 
         const panelButtonSwitch = new Adw.SwitchRow({
@@ -592,7 +1047,73 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.DEBUG_SHOW_PANEL_BUTTON, panelButtonSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        debugGroup.add(panelButtonSwitch);
+        debugGroup.add_row(panelButtonSwitch);
+
+        // Reset play counts (lightweight: keep metadata, only zero playCount fields)
+        const resetPlayCountsForKey = (metadataKey) => {
+            try {
+                const current = window._settings.get_value(metadataKey).recursiveUnpack() || {};
+                const variantDict = {};
+                for (const [path, value] of Object.entries(current)) {
+                    const valueDict = {};
+                    const unpacked = value?.recursiveUnpack ? value.recursiveUnpack() : value;
+                    const obj = unpacked || {};
+                    if (obj.fps !== undefined && obj.fps !== null)
+                        valueDict.fps = new GLib.Variant('i', Number.parseInt(obj.fps, 10) || 0);
+                    if (obj.width !== undefined && obj.width !== null)
+                        valueDict.width = new GLib.Variant('i', Number.parseInt(obj.width, 10) || 0);
+                    if (obj.height !== undefined && obj.height !== null)
+                        valueDict.height = new GLib.Variant('i', Number.parseInt(obj.height, 10) || 0);
+                    if (obj.duration !== undefined && obj.duration !== null)
+                        valueDict.duration = new GLib.Variant('i', Number.parseInt(obj.duration, 10) || 0);
+                    valueDict.playCount = new GLib.Variant('i', 0);
+                    variantDict[path] = new GLib.Variant('a{sv}', valueDict);
+                }
+                window._settings.set_value(metadataKey, new GLib.Variant('a{sv}', variantDict));
+            } catch (e) {
+                console.log('Error resetting play counts:', e);
+            }
+        };
+
+        const resetCountsRow = new Adw.ActionRow({
+            title: 'Reset Play Counts',
+            subtitle: 'Reset lockscreen or wallpaper counters without re-detecting metadata',
+        });
+        const resetLockButton = new Gtk.Button({
+            label: 'Lock Screen',
+            icon_name: 'changes-prevent-symbolic',
+            valign: Gtk.Align.CENTER,
+        });
+        resetLockButton.connect('clicked', () => {
+            resetPlayCountsForKey(Keys.VIDEO_METADATA);
+        });
+        const resetWallpaperButton = new Gtk.Button({
+            label: 'Wallpaper',
+            icon_name: 'user-desktop-symbolic',
+            valign: Gtk.Align.CENTER,
+        });
+        resetWallpaperButton.connect('clicked', () => {
+            resetPlayCountsForKey(Keys.WALLPAPER_VIDEO_METADATA);
+        });
+        const resetBothButton = new Gtk.Button({
+            label: 'Both',
+            icon_name: 'edit-clear-symbolic',
+            valign: Gtk.Align.CENTER,
+        });
+        resetBothButton.connect('clicked', () => {
+            resetPlayCountsForKey(Keys.VIDEO_METADATA);
+            resetPlayCountsForKey(Keys.WALLPAPER_VIDEO_METADATA);
+        });
+        const resetButtonsBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 8,
+            valign: Gtk.Align.CENTER,
+        });
+        resetButtonsBox.append(resetLockButton);
+        resetButtonsBox.append(resetWallpaperButton);
+        resetButtonsBox.append(resetBothButton);
+        resetCountsRow.add_suffix(resetButtonsBox);
+        debugGroup.add_row(resetCountsRow);
 
         const skipFrameSwitch = new Adw.SwitchRow({
             title: 'Skip first frame',
@@ -602,7 +1123,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.DEBUG_SKIP_FIRST_FRAME, skipFrameSwitch, 
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        debugGroup.add(skipFrameSwitch);
+        debugGroup.add_row(skipFrameSwitch);
 
         const skipFrameDefaultSubtitle = 'Enable this if there is a brief green screen at the start';
         const updateSkipFrameSensitivity = () => {
@@ -627,12 +1148,13 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.DEBUG_GTK_HELPER_LOGS, helperLogsSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        debugGroup.add(helperLogsSwitch);
+        debugGroup.add_row(helperLogsSwitch);
 
         // Log viewer expander
         const logExpander = new Adw.ExpanderRow({
             title: 'View Logs',
             subtitle: 'View extension logs with filtering options',
+            expanded: false,
         });
 
         // Log type toggles
@@ -725,13 +1247,14 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         // Initial load
         this._refreshLogs(logTextView, logTypeSwitches, logTypes);
 
-        debugGroup.add(logExpander);
+        debugGroup.add_row(logExpander);
         return debugGroup;
     }
 
     _buildPanelIconGroup(window) {
-        let iconGroup = new Adw.PreferencesGroup({
+        let iconGroup = new Adw.ExpanderRow({
             title: 'Panel Icon',
+            expanded: false,
         });
 
         // Icon selection dropdown
@@ -746,7 +1269,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         iconModeRow.connect('notify::selected', row => {
             window._settings.set_int(Keys.PANEL_ICON_MODE, row.selected);
         });
-        iconGroup.add(iconModeRow);
+        iconGroup.add_row(iconModeRow);
 
         return iconGroup;
     }
@@ -2335,9 +2858,10 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
     // Lock screen single-video group (when per-monitor is off).
     _buildLockscreenSingleVideoGroup(window) {
-        const group = new Adw.PreferencesGroup({
+        const group = new Adw.ExpanderRow({
             title: 'Videos',
-            description: 'Videos shared across all monitors on the lock screen',
+            subtitle: 'Videos shared across all monitors on the lock screen',
+            expanded: false,
         });
 
         this._ensureThumbnailCss(window);
@@ -2362,10 +2886,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             title: 'Video List',
         });
 
-        group.add(widget.expanderRow);
-        group.add(widget.addFilesRow);
-        group.add(widget.addFolderRow);
-        group.add(widget.refreshRow);
+        group.add_row(widget.expanderRow);
+        group.add_row(widget.addSourcesRow);
+        group.add_row(widget.refreshRow);
 
         window._settings.connect('changed::' + Keys.VIDEO_PATHS, () => {
             widget.updateList();
@@ -2381,9 +2904,10 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
     // Lock screen per-monitor group (when per-monitor is on).
     _buildLockscreenPerMonitorGroup(window) {
-        const group = new Adw.PreferencesGroup({
+        const group = new Adw.ExpanderRow({
             title: 'Per-Monitor Videos',
-            description: 'Each monitor has its own independent set of videos on the lock screen',
+            subtitle: 'Each monitor has its own independent set of videos on the lock screen',
+            expanded: false,
         });
 
         this._ensureThumbnailCss(window);
@@ -2412,10 +2936,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 title: displayName,
             });
 
-            group.add(widget.expanderRow);
-            group.add(widget.addFilesRow);
-            group.add(widget.addFolderRow);
-            group.add(widget.refreshRow);
+            group.add_row(widget.expanderRow);
+            group.add_row(widget.addSourcesRow);
+            group.add_row(widget.refreshRow);
 
             window._settings.connect('changed::' + Keys.LOCKSCREEN_PER_MONITOR_CONFIG, () => {
                 widget.updateList();
@@ -2433,7 +2956,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 subtitle: 'Monitor detection may require a running Wayland/X11 session',
                 icon_name: 'dialog-warning-symbolic',
             });
-            group.add(infoRow);
+            group.add_row(infoRow);
         }
 
         return group;
@@ -2446,6 +2969,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         const expanderRow = new Adw.ExpanderRow({
             title: title,
             subtitle: `${paths.length} video${paths.length !== 1 ? 's' : ''} selected`,
+            expanded: false,
         });
 
         const listBox = new Gtk.ListBox({ selection_mode: Gtk.SelectionMode.NONE });
@@ -2693,23 +3217,30 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
         updateList();
 
-        // Add files row
-        const addFilesRow = new Adw.ActionRow({ title: 'Add Videos', subtitle: 'Select multiple video files' });
-        const addFilesButton = new Adw.ButtonContent({ icon_name: 'document-open-symbolic', label: 'Select Files' });
-        addFilesRow.activatable_widget = addFilesButton;
-        addFilesRow.add_suffix(addFilesButton);
-        addFilesRow.connect('activated', () => {
+        // Source actions on one line
+        const addSourcesRow = new Adw.ActionRow({ title: 'Add Videos / Folder', subtitle: 'Select files or a folder containing videos' });
+        const addFilesButton = new Gtk.Button({
+            child: new Adw.ButtonContent({ icon_name: 'video-x-generic-symbolic', label: 'Select Files' }),
+            valign: Gtk.Align.CENTER,
+        });
+        addFilesButton.connect('clicked', () => {
             this._openGenericFileDialog(window, getPaths, setPaths, metadataKey, updateList);
         });
-
-        // Add folder row
-        const addFolderRow = new Adw.ActionRow({ title: 'Add Folder', subtitle: 'Select a folder containing videos' });
-        const addFolderButton = new Adw.ButtonContent({ icon_name: 'folder-open-symbolic', label: 'Select Folder' });
-        addFolderRow.activatable_widget = addFolderButton;
-        addFolderRow.add_suffix(addFolderButton);
-        addFolderRow.connect('activated', () => {
+        const addFolderButton = new Gtk.Button({
+            child: new Adw.ButtonContent({ icon_name: 'folder-open-symbolic', label: 'Select Folder' }),
+            valign: Gtk.Align.CENTER,
+        });
+        addFolderButton.connect('clicked', () => {
             this._openGenericFolderDialog(window, getPaths, setPaths, metadataKey, updateList);
         });
+        const sourcesBox = new Gtk.Box({
+            orientation: Gtk.Orientation.HORIZONTAL,
+            spacing: 8,
+            valign: Gtk.Align.CENTER,
+        });
+        sourcesBox.append(addFilesButton);
+        sourcesBox.append(addFolderButton);
+        addSourcesRow.add_suffix(sourcesBox);
 
         // Refresh thumbnails row
         const refreshRow = new Adw.ActionRow({ title: 'Refresh Thumbnails', subtitle: 'Clear cached thumbnails and regenerate' });
@@ -2732,7 +3263,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             updateList();
         });
 
-        return { expanderRow, updateList, addFilesRow, addFolderRow, refreshRow };
+        return { expanderRow, updateList, addSourcesRow, refreshRow };
     }
 
     // Reusable file picker helper.
@@ -2839,9 +3370,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
     }
 
     _buildWallpaperControlGroup(window) {
-        const group = new Adw.PreferencesGroup({
-            title: 'Video Wallpaper',
-            description: 'Set a video as your desktop wallpaper — changes apply live',
+        const group = new Adw.ExpanderRow({
+            title: 'General',
+            expanded: false,
         });
 
         // Enable toggle
@@ -2853,7 +3384,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.WALLPAPER_ENABLED, enableSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        group.add(enableSwitch);
+        group.add_row(enableSwitch);
 
         // Per-monitor toggle
         const perMonitorSwitch = new Adw.SwitchRow({
@@ -2864,7 +3395,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.WALLPAPER_PER_MONITOR, perMonitorSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        group.add(perMonitorSwitch);
+        group.add_row(perMonitorSwitch);
 
         // Loop toggle (with conditional logic like lock screen)
         const loopSwitch = new Adw.SwitchRow({
@@ -2916,12 +3447,39 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             }
             updateSensitivity();
         };
-        updateLoopSensitivity();
         window._settings.connect('changed::' + Keys.WALLPAPER_VIDEO_PATHS, updateLoopSensitivity);
         window._settings.connect('changed::' + Keys.WALLPAPER_PER_MONITOR, updateLoopSensitivity);
         window._settings.connect('changed::' + Keys.WALLPAPER_PER_MONITOR_CONFIG, updateLoopSensitivity);
-        group.add(randomOrderSwitch);
-        group.add(loopSwitch);
+        group.add_row(randomOrderSwitch);
+        group.add_row(loopSwitch);
+
+        const volumeRow = new Adw.SpinRow({
+            title: 'Volume',
+            adjustment: new Gtk.Adjustment({
+                lower: 0,
+                upper: 100,
+                step_increment: 1,
+                value: window._settings.get_int(Keys.WALLPAPER_VOLUME),
+            }),
+        });
+        volumeRow.add_suffix(new Gtk.Label({ label: '%', valign: Gtk.Align.CENTER, css_classes: ['dim-label'] }));
+        volumeRow.connect('notify::value', row => {
+            window._settings.set_int(Keys.WALLPAPER_VOLUME, row.get_value());
+        });
+        group.add_row(volumeRow);
+
+        const scalingRow = new Adw.ComboRow({
+            title: 'Scaling mode',
+            subtitle: 'How the video is scaled to fit the screen',
+            model: new Gtk.StringList({
+                strings: ['Stretch', 'Fit', 'Cover']
+            }),
+        });
+        scalingRow.set_selected(window._settings.get_int(Keys.WALLPAPER_SCALING_MODE));
+        scalingRow.connect('notify::selected', row => {
+            window._settings.set_int(Keys.WALLPAPER_SCALING_MODE, row.selected);
+        });
+        group.add_row(scalingRow);
 
         if (this._hasBatteryDevice()) {
             const batterySwitch = new Adw.SwitchRow({
@@ -2932,7 +3490,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 Keys.WALLPAPER_DISABLE_ON_BATTERY, batterySwitch,
                 'active', Gio.SettingsBindFlags.DEFAULT
             );
-            group.add(batterySwitch);
+            group.add_row(batterySwitch);
         }
 
         // Sensitivity: disable controls when wallpaper is disabled
@@ -2941,7 +3499,10 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             perMonitorSwitch.set_sensitive(enabled);
             randomOrderSwitch.set_sensitive(enabled);
             loopSwitch.set_sensitive(enabled && loopAllowedByPlaylist);
+            volumeRow.set_sensitive(enabled);
+            scalingRow.set_sensitive(enabled);
         }
+        updateLoopSensitivity();
         updateSensitivity();
         enableSwitch.connect('notify::active', updateSensitivity);
 
@@ -2950,9 +3511,10 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
     // Wallpaper single-video group (when per-monitor is off).
     _buildWallpaperSingleVideoGroup(window) {
-        const group = new Adw.PreferencesGroup({
+        const group = new Adw.ExpanderRow({
             title: 'Videos',
-            description: 'Videos shared across all monitors',
+            subtitle: 'Videos shared across all monitors',
+            expanded: false,
         });
 
         // Ensure CSS provider is loaded
@@ -2974,10 +3536,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             title: 'Video List',
         });
 
-        group.add(widget.expanderRow);
-        group.add(widget.addFilesRow);
-        group.add(widget.addFolderRow);
-        group.add(widget.refreshRow);
+        group.add_row(widget.expanderRow);
+        group.add_row(widget.addSourcesRow);
+        group.add_row(widget.refreshRow);
 
         // Watch for path changes to refresh list
         window._settings.connect('changed::' + Keys.WALLPAPER_VIDEO_PATHS, () => {
@@ -2995,9 +3556,10 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
     // Wallpaper per-monitor group (when per-monitor is on).
     _buildWallpaperPerMonitorGroup(window) {
-        const group = new Adw.PreferencesGroup({
+        const group = new Adw.ExpanderRow({
             title: 'Per-Monitor Videos',
-            description: 'Each monitor has its own independent set of videos',
+            subtitle: 'Each monitor has its own independent set of videos',
+            expanded: false,
         });
 
         // Ensure CSS provider is loaded
@@ -3027,10 +3589,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 title: displayName,
             });
 
-            group.add(widget.expanderRow);
-            group.add(widget.addFilesRow);
-            group.add(widget.addFolderRow);
-            group.add(widget.refreshRow);
+            group.add_row(widget.expanderRow);
+            group.add_row(widget.addSourcesRow);
+            group.add_row(widget.refreshRow);
 
             // Watch for config changes to refresh this monitor's list
             window._settings.connect('changed::' + Keys.WALLPAPER_PER_MONITOR_CONFIG, () => {
@@ -3051,7 +3612,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 subtitle: 'Monitor detection may require a running Wayland/X11 session',
                 icon_name: 'dialog-warning-symbolic',
             });
-            group.add(infoRow);
+            group.add_row(infoRow);
         }
 
         return group;
@@ -3082,8 +3643,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
     }
 
     _buildWallpaperAppearanceGroup(window) {
-        const group = new Adw.PreferencesGroup({
+        const group = new Adw.ExpanderRow({
             title: 'Appearance',
+            expanded: false,
         });
 
         // Render quality
@@ -3099,36 +3661,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         qualityRow.connect('notify::value', row => {
             window._settings.set_int(Keys.WALLPAPER_QUALITY, row.get_value());
         });
-        group.add(qualityRow);
-
-        // Scaling mode
-        const scalingRow = new Adw.ComboRow({
-            title: 'Scaling mode',
-            subtitle: 'How the video is scaled to fit the screen',
-            model: new Gtk.StringList({
-                strings: ['Stretch', 'Fit', 'Cover']
-            }),
-        });
-        scalingRow.set_selected(window._settings.get_int(Keys.WALLPAPER_SCALING_MODE));
-        scalingRow.connect('notify::selected', row => {
-            window._settings.set_int(Keys.WALLPAPER_SCALING_MODE, row.selected);
-        });
-        group.add(scalingRow);
-
-        // Volume
-        const volumeRow = new Adw.SpinRow({
-            title: 'Volume',
-            subtitle: 'Audio volume (0 = muted)',
-            adjustment: new Gtk.Adjustment({
-                lower: 0, upper: 100, step_increment: 1,
-                value: window._settings.get_int(Keys.WALLPAPER_VOLUME),
-            }),
-        });
-        volumeRow.add_suffix(new Gtk.Label({ label: '%', valign: Gtk.Align.CENTER, css_classes: ['dim-label'] }));
-        volumeRow.connect('notify::value', row => {
-            window._settings.set_int(Keys.WALLPAPER_VOLUME, row.get_value());
-        });
-        group.add(volumeRow);
+        group.add_row(qualityRow);
 
         // Auto FPS
         const autoFpsSwitch = new Adw.SwitchRow({
@@ -3139,7 +3672,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             Keys.WALLPAPER_AUTO_FPS, autoFpsSwitch,
             'active', Gio.SettingsBindFlags.DEFAULT
         );
-        group.add(autoFpsSwitch);
+        group.add_row(autoFpsSwitch);
 
         // Manual FPS
         const fpsRow = new Adw.SpinRow({
@@ -3157,7 +3690,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         const toggleFps = () => fpsRow.set_sensitive(!autoFpsSwitch.active);
         toggleFps();
         autoFpsSwitch.connect('notify::active', toggleFps);
-        group.add(fpsRow);
+        group.add_row(fpsRow);
 
         // Fade in
         const fadeRow = new Adw.SpinRow({
@@ -3172,7 +3705,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         fadeRow.connect('notify::value', row => {
             window._settings.set_int(Keys.WALLPAPER_FADE_IN_DURATION, row.get_value());
         });
-        group.add(fadeRow);
+        group.add_row(fadeRow);
 
         // Blur radius
         const blurRow = new Adw.SpinRow({
@@ -3183,7 +3716,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             }),
         });
         blurRow.add_suffix(new Gtk.Label({ label: 'px', valign: Gtk.Align.CENTER, css_classes: ['dim-label'] }));
-        group.add(blurRow);
+        group.add_row(blurRow);
 
         // Blur brightness
         const blurBrightnessRow = new Adw.SpinRow({
@@ -3194,7 +3727,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             }),
         });
         blurBrightnessRow.add_suffix(new Gtk.Label({ label: '%', valign: Gtk.Align.CENTER, css_classes: ['dim-label'] }));
-        group.add(blurBrightnessRow);
+        group.add_row(blurBrightnessRow);
 
         const toggleBrightness = () => {
             blurBrightnessRow.set_sensitive(blurRow.get_value() !== 0);
@@ -3213,8 +3746,6 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         const wpEnabled = window._settings.get_boolean(Keys.WALLPAPER_ENABLED);
         const setGroupSensitivity = (enabled) => {
             qualityRow.set_sensitive(enabled);
-            scalingRow.set_sensitive(enabled);
-            volumeRow.set_sensitive(enabled);
             autoFpsSwitch.set_sensitive(enabled);
             fpsRow.set_sensitive(enabled && !autoFpsSwitch.active);
             fadeRow.set_sensitive(enabled);
