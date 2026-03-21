@@ -119,7 +119,12 @@ export default class Player {
                 const baseH = monitorConfig?.height || geo?.height || 1080;
                 const targetWidth = shouldScale ? Math.max(1, Math.round(baseW * renderScale)) : 0;
                 const targetHeight = shouldScale ? Math.max(1, Math.round(baseH * renderScale)) : 0;
-                const initialIndex = this._pickInitialIndex(videos, randomOrder, usedInitialVideos);
+                const configuredInitialIndex = Number.isInteger(monitorConfig?.initialIndex)
+                    ? monitorConfig.initialIndex
+                    : null;
+                const initialIndex = configuredInitialIndex !== null
+                    ? configuredInitialIndex
+                    : this._pickInitialIndex(videos, randomOrder, usedInitialVideos);
 
                 const pipeline = new Pipeline({
                     videos,
@@ -161,6 +166,7 @@ export default class Player {
                 framerate: config.framerate,
                 targetWidth,
                 targetHeight,
+                initialIndex: Number.isInteger(sharedConfig?.initialIndex) ? sharedConfig.initialIndex : null,
             });
             pipeline.init();
             this._pipelines.push(pipeline);
