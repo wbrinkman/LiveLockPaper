@@ -28,21 +28,21 @@
 
 ---
 
-## What's New in v2.0.0?
+## What's New in v3.0.0?
 
-### 🐛 **Bug Fixes**
-- **Window positioning** – Improved window positioning and helper window handling across multiple monitors
-- **Sleep/wake blocking** – Fixed video processes blocking system sleep by properly destroying lockscreen videos on sleep and pausing wallpaper videos
+### ✨ Highlights
 
-### ✨ **Enhancements**
-- **Panel icon customization** – Dynamic icons that change based on wallpaper/lockscreen state (standard GNOME icons or custom icons), or static custom icons
-- **Enhanced panel menu** – Organized submenus for wallpaper and lockscreen settings
-- **Separate battery controls** – Independent battery disable options for lockscreen and wallpaper (enabled by default to save battery)
-- **Enhanced pause when hidden** – Three modes: Off, All monitors covered, or Any monitor covered
-- **Improved sleep/wake handling** – Enhanced video pause/resume during system sleep/wake cycles (lockscreen is destroyed/recreated, wallpaper is paused/resumed)
-- **Verbose logging** – Enhanced debug logging for troubleshooting (GTK helper windows, sleep/wake events, state changes)
-- **Folder scanning improvement** – When scanning a folder for videos, the extension now replaces the current video list instead of appending to it, preventing duplicate entries
-- **Grayscale prompt** – Option to enable grayscale effect on password prompt
+- **Preferences reorganization** - Lock Screen, Wallpaper, and Debug pages now use collapsed expanders to keep pages compact and easier to scan.
+- **Keep Awake feature** - Added configurable keep-awake behavior for lockscreen playback workflows.
+- **Lockscreen text customization** - Added richer controls for command output, time/date formatting, and text styling.
+- **Video list and layout polish** - Improved button layout and icon consistency in file/folder selection flows.
+- **Expander row behavior** - Correct nested arrow-state visuals by relying on default `Adw.ExpanderRow` behavior.
+- **Wallpaper settings robustness** - Correct initialization order in wallpaper preferences to avoid transient sensitivity issues.
+- **Clock and command output updates** - More consistent second-precision at minute rollover and faster hour-boundary command refresh.
+
+### 🐛 Fixes
+
+- **Play count reliability** - Reworked play-count tracking and reset behavior for lockscreen and wallpaper modes, including GTK4 helper mode paths.
 
 ---
 
@@ -74,6 +74,12 @@ These defaults are aimed at sensible behavior out of the box:
 - **Lock screen video:** enabled
 - **Lock screen random order:** enabled
 - **Lock screen auto FPS:** enabled
+- **Lock screen customize text:** disabled
+- **Lock screen command output command:** empty
+- **Lock screen custom time/date formats:** empty (use GNOME defaults)
+- **Lock screen keep awake:** disabled
+- **Keep awake only on AC:** enabled
+- **Keep awake timeout:** `Never`
 - **Change blur on password prompt:** enabled
 - **Grayscale prompt:** disabled
 - **Lock screen disable on battery:** enabled (saves battery on laptops)
@@ -215,6 +221,28 @@ This helps save CPU/GPU resources when the wallpaper isn't visible.
 - **Video wallpaper** uses GPU/CPU continuously — higher framerates and per-monitor mode use more resources.
 - Most settings apply immediately; a few session-level changes may still need an extension reload.
 - Window positioning may need adjustment when settings window is on a different monitor (work in progress).
+
+---
+
+## Recent Updates
+
+### What's New in v2.0.0?
+
+#### 🐛 **Bug Fixes**
+
+- **Window positioning** - Improved window positioning and helper window handling across multiple monitors
+- **Sleep/wake blocking** - Fixed video processes blocking system sleep by properly destroying lockscreen videos on sleep and pausing wallpaper videos
+
+#### ✨ **Enhancements**
+
+- **Panel icon customization** - Dynamic icons that change based on wallpaper/lockscreen state (standard GNOME icons or custom icons), or static custom icons
+- **Enhanced panel menu** - Organized submenus for wallpaper and lockscreen settings
+- **Separate battery controls** - Independent battery disable options for lockscreen and wallpaper (enabled by default to save battery)
+- **Enhanced pause when hidden** - Three modes: Off, All monitors covered, or Any monitor covered
+- **Improved sleep/wake handling** - Enhanced video pause/resume during system sleep/wake cycles (lockscreen is destroyed/recreated, wallpaper is paused/resumed)
+- **Verbose logging** - Enhanced debug logging for troubleshooting (GTK helper windows, sleep/wake events, state changes)
+- **Folder scanning improvement** - When scanning a folder for videos, the extension now replaces the current video list instead of appending to it, preventing duplicate entries
+- **Grayscale prompt** - Option to enable grayscale effect on password prompt
 
 ---
 
