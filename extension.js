@@ -153,6 +153,7 @@ export default class LockscreenExtension extends Extension {
             if (!this._settings) {
                 this._settings = this.getSettings();
             }
+            this._syncKeepAwakeHooks();
             if (!this._panelVisibilityChangedId) {
                 this._panelVisibilityChangedId = this._settings.connect(
                     `changed::${Keys.DEBUG_SHOW_PANEL_BUTTON}`,
@@ -174,6 +175,47 @@ export default class LockscreenExtension extends Extension {
                         this._onLockRuntimeSettingChanged();
                     })
                 );
+            }
+            if (!this._lockTextSettingIds) {
+                this._lockTextSettingIds = [];
+                const textKeys = [
+                    Keys.LOCKSCREEN_TEXT_CUSTOMIZE_ENABLED,
+                    Keys.LOCKSCREEN_TEXT_HIDE_CMD,
+                    Keys.LOCKSCREEN_TEXT_HIDE_TIME,
+                    Keys.LOCKSCREEN_TEXT_HIDE_DATE,
+                    Keys.LOCKSCREEN_TEXT_HIDE_HINT,
+                    Keys.LOCKSCREEN_TEXT_CMD_SIZE,
+                    Keys.LOCKSCREEN_TEXT_TIME_SIZE,
+                    Keys.LOCKSCREEN_TEXT_DATE_SIZE,
+                    Keys.LOCKSCREEN_TEXT_HINT_SIZE,
+                    Keys.LOCKSCREEN_TEXT_CMD_COLOR,
+                    Keys.LOCKSCREEN_TEXT_TIME_COLOR,
+                    Keys.LOCKSCREEN_TEXT_DATE_COLOR,
+                    Keys.LOCKSCREEN_TEXT_HINT_COLOR,
+                    Keys.LOCKSCREEN_TEXT_CMD_FONT,
+                    Keys.LOCKSCREEN_TEXT_TIME_FONT,
+                    Keys.LOCKSCREEN_TEXT_DATE_FONT,
+                    Keys.LOCKSCREEN_TEXT_HINT_FONT,
+                    Keys.LOCKSCREEN_TEXT_CMD_WEIGHT,
+                    Keys.LOCKSCREEN_TEXT_TIME_WEIGHT,
+                    Keys.LOCKSCREEN_TEXT_DATE_WEIGHT,
+                    Keys.LOCKSCREEN_TEXT_HINT_WEIGHT,
+                    Keys.LOCKSCREEN_TEXT_CMD_STYLE,
+                    Keys.LOCKSCREEN_TEXT_TIME_STYLE,
+                    Keys.LOCKSCREEN_TEXT_DATE_STYLE,
+                    Keys.LOCKSCREEN_TEXT_HINT_STYLE,
+                    Keys.LOCKSCREEN_TEXT_CMD_COMMAND,
+                    Keys.LOCKSCREEN_TEXT_TIME_FORMAT,
+                    Keys.LOCKSCREEN_TEXT_DATE_FORMAT,
+                    Keys.LOCKSCREEN_KEEP_AWAKE_ENABLED,
+                    Keys.LOCKSCREEN_KEEP_AWAKE_TIMEOUT_SECONDS,
+                    Keys.LOCKSCREEN_KEEP_AWAKE_ONLY_ON_AC,
+                ];
+                for (const key of textKeys) {
+                    this._lockTextSettingIds.push(
+                        this._settings.connect(`changed::${key}`, () => this._onLockTextSettingsChanged())
+                    );
+                }
             }
             this._ensureStatusIndicator();
 
@@ -248,6 +290,15 @@ export default class LockscreenExtension extends Extension {
                 }
                 this._lockRuntimeSettingIds = [];
             }
+            if (this._lockTextSettingIds && this._settings) {
+                for (const id of this._lockTextSettingIds) {
+                    try { this._settings.disconnect(id); } catch (_) {}
+                }
+                this._lockTextSettingIds = [];
+            }
+            this._removeKeepAwakeHooks();
+            this._clearLockTextCommandState();
+            this._stopAllPlayCountTracking();
             this._currentActivatedMode = null;
             this._settings = null;
         } catch (e) {
@@ -302,6 +353,7 @@ export default class LockscreenExtension extends Extension {
             console.log('[LiveLockPaper] → tearing down lock screen, resuming wallpaper');
             this._currentActivatedMode = mode;
             this._disableLockScreen();
+            this._clearKeepAwakeTimer();
             this._resumeWallpaper();
         }
         this._syncStatusIndicator();
@@ -336,6 +388,465 @@ export default class LockscreenExtension extends Extension {
         this._disableLockScreen();
         if (this._settings?.get_boolean(Keys.LOCKSCREEN_ENABLED))
             this._enableLockScreen();
+    }
+
+    _onLockTextSettingsChanged() {
+        this._syncKeepAwakeHooks();
+        if (Main.sessionMode.currentMode !== 'unlock-dialog')
+            return;
+        this._applyLockscreenTextCustomization();
+        this._restartKeepAwakeTimerIfNeeded();
+    }
+
+    _getLockscreenTextSettings() {
+        return {
+            enabled: this._settings.get_boolean(Keys.LOCKSCREEN_TEXT_CUSTOMIZE_ENABLED),
+            hideCmd: this._settings.get_boolean(Keys.LOCKSCREEN_TEXT_HIDE_CMD),
+            hideTime: this._settings.get_boolean(Keys.LOCKSCREEN_TEXT_HIDE_TIME),
+            hideDate: this._settings.get_boolean(Keys.LOCKSCREEN_TEXT_HIDE_DATE),
+            hideHint: this._settings.get_boolean(Keys.LOCKSCREEN_TEXT_HIDE_HINT),
+            cmdSize: this._settings.get_int(Keys.LOCKSCREEN_TEXT_CMD_SIZE),
+            timeSize: this._settings.get_int(Keys.LOCKSCREEN_TEXT_TIME_SIZE),
+            dateSize: this._settings.get_int(Keys.LOCKSCREEN_TEXT_DATE_SIZE),
+            hintSize: this._settings.get_int(Keys.LOCKSCREEN_TEXT_HINT_SIZE),
+            cmdColor: this._settings.get_string(Keys.LOCKSCREEN_TEXT_CMD_COLOR),
+            timeColor: this._settings.get_string(Keys.LOCKSCREEN_TEXT_TIME_COLOR),
+            dateColor: this._settings.get_string(Keys.LOCKSCREEN_TEXT_DATE_COLOR),
+            hintColor: this._settings.get_string(Keys.LOCKSCREEN_TEXT_HINT_COLOR),
+            cmdFont: this._settings.get_string(Keys.LOCKSCREEN_TEXT_CMD_FONT).trim(),
+            timeFont: this._settings.get_string(Keys.LOCKSCREEN_TEXT_TIME_FONT).trim(),
+            dateFont: this._settings.get_string(Keys.LOCKSCREEN_TEXT_DATE_FONT).trim(),
+            hintFont: this._settings.get_string(Keys.LOCKSCREEN_TEXT_HINT_FONT).trim(),
+            cmdWeight: this._settings.get_string(Keys.LOCKSCREEN_TEXT_CMD_WEIGHT).trim(),
+            timeWeight: this._settings.get_string(Keys.LOCKSCREEN_TEXT_TIME_WEIGHT).trim(),
+            dateWeight: this._settings.get_string(Keys.LOCKSCREEN_TEXT_DATE_WEIGHT).trim(),
+            hintWeight: this._settings.get_string(Keys.LOCKSCREEN_TEXT_HINT_WEIGHT).trim(),
+            cmdStyle: this._settings.get_string(Keys.LOCKSCREEN_TEXT_CMD_STYLE).trim(),
+            timeStyle: this._settings.get_string(Keys.LOCKSCREEN_TEXT_TIME_STYLE).trim(),
+            dateStyle: this._settings.get_string(Keys.LOCKSCREEN_TEXT_DATE_STYLE).trim(),
+            hintStyle: this._settings.get_string(Keys.LOCKSCREEN_TEXT_HINT_STYLE).trim(),
+            cmdCommand: this._settings.get_string(Keys.LOCKSCREEN_TEXT_CMD_COMMAND).trim(),
+            timeFormat: this._settings.get_string(Keys.LOCKSCREEN_TEXT_TIME_FORMAT).trim(),
+            dateFormat: this._settings.get_string(Keys.LOCKSCREEN_TEXT_DATE_FORMAT).trim(),
+        };
+    }
+
+    _findActorByStyleClass(root, className) {
+        if (!root)
+            return null;
+        if (typeof root.has_style_class_name === 'function' && root.has_style_class_name(className))
+            return root;
+        if (typeof root.get_children !== 'function')
+            return null;
+        for (const child of root.get_children()) {
+            const found = this._findActorByStyleClass(child, className);
+            if (found)
+                return found;
+        }
+        return null;
+    }
+
+    _ensureCmdOutputLabel(clock) {
+        if (!clock)
+            return null;
+        if (this._lockTextCmdLabel && this._lockTextCmdLabel.get_parent()) {
+            this._lockTextCmdLabel.remove_style_class_name?.('screen-shield-hint-label');
+            this._lockTextCmdLabel.add_style_class_name?.('live-lockpaper-cmd-label');
+            return this._lockTextCmdLabel;
+        }
+
+        const container = clock._box ?? clock;
+        if (!container || typeof container.insert_child_at_index !== 'function')
+            return null;
+
+        const label = new St.Label({
+            style_class: 'live-lockpaper-cmd-label',
+            x_align: Clutter.ActorAlign.CENTER,
+        });
+        container.insert_child_at_index(label, 0);
+        this._lockTextCmdLabel = label;
+        return label;
+    }
+
+    _clearLockTextTimer() {
+        if (this._lockTextRefreshId) {
+            GLib.Source.remove(this._lockTextRefreshId);
+            this._lockTextRefreshId = null;
+        }
+        this._clearLockTextLabelHooks();
+    }
+
+    _clearLockTextLabelHooks() {
+        if (!this._lockTextLabelHookIds)
+            return;
+        for (const [label, id] of this._lockTextLabelHookIds) {
+            try {
+                if (label && id)
+                    label.disconnect(id);
+            } catch (_) {}
+        }
+        this._lockTextLabelHookIds = null;
+    }
+
+    _clearLockTextCommandState() {
+        if (this._lockTextCommandTimeoutIds) {
+            for (const id of this._lockTextCommandTimeoutIds.values())
+                GLib.Source.remove(id);
+            this._lockTextCommandTimeoutIds.clear();
+        }
+        this._lockTextPendingCommands?.clear();
+        this._lockTextCommandState = {};
+    }
+
+    _formatNow(formatString, fallbackText) {
+        if (!formatString)
+            return fallbackText;
+        try {
+            return GLib.DateTime.new_now_local().format(formatString) ?? fallbackText;
+        } catch (_) {
+            return fallbackText;
+        }
+    }
+
+    _buildLockTextStyle(sizePx, color, fontFamily, fontWeight, fontStyle) {
+        const parts = [`font-size: ${sizePx}px`, `color: ${color}`];
+        if (fontFamily)
+            parts.push(`font-family: "${fontFamily.replace(/"/g, '\\"')}"`);
+        if (fontWeight)
+            parts.push(`font-weight: ${fontWeight}`);
+        if (fontStyle)
+            parts.push(`font-style: ${fontStyle}`);
+        return `${parts.join('; ')};`;
+    }
+
+    _runLockTextCommand(kind, command, label, options = {}) {
+        if (!command || !label)
+            return;
+        if (!this._lockTextPendingCommands)
+            this._lockTextPendingCommands = new Set();
+        if (!this._lockTextCommandTimeoutIds)
+            this._lockTextCommandTimeoutIds = new Map();
+        if (!this._lockTextCommandState)
+            this._lockTextCommandState = {};
+        if (!this._lockTextCommandState[kind])
+            this._lockTextCommandState[kind] = {lastOutput: '', pauseUntilMs: 0, lastHour: -1};
+        const state = this._lockTextCommandState[kind];
+        
+        // Check if hour changed - force refresh for time-sensitive commands
+        const now = GLib.DateTime.new_now_local();
+        const currentHour = now.get_hour();
+        const hourChanged = state.lastHour !== -1 && state.lastHour !== currentHour;
+        if (hourChanged)
+            state.pauseUntilMs = 0; // Force refresh on hour change
+        
+        if (this._lockTextPendingCommands.has(kind)) {
+            // If hour changed and command is running, cancel it to restart with new hour
+            if (hourChanged && this._lockTextCommandTimeoutIds.has(kind)) {
+                const timeoutId = this._lockTextCommandTimeoutIds.get(kind);
+                GLib.Source.remove(timeoutId);
+                this._lockTextCommandTimeoutIds.delete(kind);
+                this._lockTextPendingCommands.delete(kind);
+            } else {
+                return;
+            }
+        }
+        if ((options.pauseWhenUnchanged ?? false) && Date.now() < state.pauseUntilMs)
+            return;
+        this._lockTextPendingCommands.add(kind);
+
+        try {
+            const proc = Gio.Subprocess.new(
+                ['/bin/sh', '-c', command],
+                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+            );
+            const timeoutMs = Math.max(100, options.timeoutMs ?? 1500);
+            const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, timeoutMs, () => {
+                try { proc.force_exit(); } catch (_) {}
+                this._lockTextCommandTimeoutIds?.delete(kind);
+                return GLib.SOURCE_REMOVE;
+            });
+            this._lockTextCommandTimeoutIds.set(kind, timeoutId);
+            proc.communicate_utf8_async(null, null, (p, res) => {
+                this._lockTextPendingCommands?.delete(kind);
+                if (this._lockTextCommandTimeoutIds?.has(kind)) {
+                    GLib.Source.remove(this._lockTextCommandTimeoutIds.get(kind));
+                    this._lockTextCommandTimeoutIds.delete(kind);
+                }
+                try {
+                    const [, stdout] = p.communicate_utf8_finish(res);
+                    let output = stdout ?? '';
+                    if (options.trimOutput ?? true)
+                        output = output.trim();
+                    if ((options.maxLength ?? 256) > 0 && output.length > options.maxLength)
+                        output = output.slice(0, options.maxLength);
+
+                    if ((options.pauseWhenUnchanged ?? false) && output === state.lastOutput) {
+                        state.pauseUntilMs = Date.now() + Math.max(1, options.unchangedBackoffSeconds ?? 15) * 1000;
+                    } else {
+                        state.pauseUntilMs = 0;
+                    }
+                    state.lastOutput = output;
+                    // Track current hour for detecting hour changes
+                    const now = GLib.DateTime.new_now_local();
+                    state.lastHour = now.get_hour();
+
+                    if (Main.sessionMode.currentMode === 'unlock-dialog' && label.visible)
+                        label.text = output;
+                } catch (_) {}
+            });
+        } catch (_) {
+            this._lockTextPendingCommands.delete(kind);
+            if (this._lockTextCommandTimeoutIds?.has(kind)) {
+                GLib.Source.remove(this._lockTextCommandTimeoutIds.get(kind));
+                this._lockTextCommandTimeoutIds.delete(kind);
+            }
+        }
+    }
+
+    _applyLockscreenTextCustomization() {
+        const dialog = Main.screenShield?._dialog;
+        if (!dialog)
+            return;
+
+        const clock = dialog._clock ?? null;
+        const timeLabel = clock?._time ?? this._findActorByStyleClass(dialog, 'screen-shield-clock-time');
+        const dateLabel = clock?._date ?? this._findActorByStyleClass(dialog, 'screen-shield-clock-date');
+        const cmdLabel = this._ensureCmdOutputLabel(clock);
+        const hintLabel =
+            this._findActorByStyleClass(dialog, 'screen-shield-hint-label')
+            || this._findActorByStyleClass(dialog, 'screen-shield-hint-text')
+            || this._findActorByStyleClass(dialog, 'screen-shield-hint')
+            || (clock?._hint ?? null);
+
+        if (!cmdLabel && !timeLabel && !dateLabel && !hintLabel)
+            return;
+
+        const cfg = this._getLockscreenTextSettings();
+
+        if (!cfg.enabled) {
+            if (cmdLabel) {
+                cmdLabel.set_style('');
+                cmdLabel.visible = false;
+                cmdLabel.text = '';
+            }
+            if (timeLabel) timeLabel.set_style('');
+            if (dateLabel) dateLabel.set_style('');
+            if (hintLabel) {
+                hintLabel.set_style('');
+                hintLabel.visible = true;
+            }
+            this._clearLockTextTimer();
+            this._clearLockTextCommandState();
+            return;
+        }
+
+        if (cmdLabel) {
+            cmdLabel.set_style(this._buildLockTextStyle(cfg.cmdSize, cfg.cmdColor, cfg.cmdFont, cfg.cmdWeight, cfg.cmdStyle));
+            cmdLabel.visible = !cfg.hideCmd && cfg.cmdCommand.length > 0;
+            if (!cfg.cmdCommand.length)
+                cmdLabel.text = '';
+        }
+        if (timeLabel)
+            timeLabel.set_style(this._buildLockTextStyle(cfg.timeSize, cfg.timeColor, cfg.timeFont, cfg.timeWeight, cfg.timeStyle));
+        if (dateLabel)
+            dateLabel.set_style(this._buildLockTextStyle(cfg.dateSize, cfg.dateColor, cfg.dateFont, cfg.dateWeight, cfg.dateStyle));
+        if (timeLabel)
+            timeLabel.visible = !cfg.hideTime;
+        if (dateLabel)
+            dateLabel.visible = !cfg.hideDate;
+        if (hintLabel) {
+            hintLabel.set_style(this._buildLockTextStyle(cfg.hintSize, cfg.hintColor, cfg.hintFont, cfg.hintWeight, cfg.hintStyle));
+            hintLabel.visible = !cfg.hideHint;
+        }
+
+        const needsCustomFormat = cfg.timeFormat.length > 0 || cfg.dateFormat.length > 0;
+        const needsCommandOutput = cfg.cmdCommand.length > 0;
+        this._clearLockTextTimer();
+        if (!needsCustomFormat && !needsCommandOutput)
+            return;
+
+        this._lockTextLabelHookIds = [];
+        const attachFormatHook = (label, format) => {
+            if (!label || !format)
+                return;
+            let applying = false;
+            const id = label.connect('notify::text', () => {
+                if (applying || Main.sessionMode.currentMode !== 'unlock-dialog')
+                    return;
+                const expected = this._formatNow(format, '');
+                if (!expected || label.text === expected)
+                    return;
+                applying = true;
+                label.text = expected;
+                applying = false;
+            });
+            this._lockTextLabelHookIds.push([label, id]);
+        };
+        attachFormatHook(timeLabel, cfg.timeFormat);
+        attachFormatHook(dateLabel, cfg.dateFormat);
+
+        const refresh = () => {
+            if (Main.sessionMode.currentMode !== 'unlock-dialog')
+                return GLib.SOURCE_CONTINUE;
+            // Always format with current time - never use fallback that might be missing seconds
+            if (timeLabel && cfg.timeFormat) {
+                const formatted = this._formatNow(cfg.timeFormat, '');
+                if (formatted) timeLabel.text = formatted;
+            }
+            if (dateLabel && cfg.dateFormat) {
+                const formatted = this._formatNow(cfg.dateFormat, '');
+                if (formatted) dateLabel.text = formatted;
+            }
+            const cmdOptions = {
+                timeoutMs: 1500,
+                trimOutput: true,
+                maxLength: 256,
+                pauseWhenUnchanged: true,
+                unchangedBackoffSeconds: 15,
+            };
+            if (cmdLabel && cfg.cmdCommand && cmdLabel.visible) {
+                // Force refresh on minute 0 to catch hour changes immediately
+                const now = GLib.DateTime.new_now_local();
+                const currentMinute = now.get_minute();
+                if (currentMinute === 0) {
+                    // At top of hour, reduce pause to ensure we catch hour changes
+                    cmdOptions.unchangedBackoffSeconds = 1;
+                }
+                this._runLockTextCommand('cmd', cfg.cmdCommand, cmdLabel, cmdOptions);
+            }
+            return GLib.SOURCE_CONTINUE;
+        };
+        
+        // Keep a low-frequency refresh for command output/date rollover; label hooks handle immediate rewrites.
+        refresh(); // Initial update
+        this._lockTextRefreshId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, refresh);
+    }
+
+    _pokeLockscreen() {
+        const shield = Main.screenShield;
+        try {
+            if (typeof shield?._wakeUpScreen === 'function')
+                shield._wakeUpScreen();
+            else if (typeof shield?.wakeUpScreen === 'function')
+                shield.wakeUpScreen();
+        } catch (_) {}
+    }
+
+    _isKeepAwakeEnabledNow() {
+        if (!this._settings)
+            return false;
+        if (!this._settings.get_boolean(Keys.LOCKSCREEN_KEEP_AWAKE_ENABLED))
+            return false;
+        if (this._settings.get_boolean(Keys.LOCKSCREEN_KEEP_AWAKE_ONLY_ON_AC) && this._isOnBattery())
+            return false;
+        return true;
+    }
+
+    _syncKeepAwakeHooks() {
+        if (this._isKeepAwakeEnabledNow())
+            this._installKeepAwakeHooks();
+        else
+            this._removeKeepAwakeHooks();
+    }
+
+    _installKeepAwakeHooks() {
+        if (this._keepAwakeHooksInstalled)
+            return;
+
+        const shield = Main.screenShield;
+        if (!shield || typeof shield._setActive !== 'function')
+            return;
+
+        this._keepAwakeHooksInstalled = true;
+        this._keepAwakeActiveOnce = false;
+        this._screenShieldSetActiveOriginal = shield._setActive;
+        shield._setActive = active => this._keepAwakeSetActive(shield, active);
+    }
+
+    _removeKeepAwakeHooks() {
+        if (!this._keepAwakeHooksInstalled)
+            return;
+
+        const shield = Main.screenShield;
+        if (shield && this._screenShieldSetActiveOriginal)
+            shield._setActive = this._screenShieldSetActiveOriginal;
+
+        this._screenShieldSetActiveOriginal = null;
+        this._keepAwakeHooksInstalled = false;
+        this._keepAwakeActiveOnce = false;
+    }
+
+    _keepAwakeSetActive(shield, active) {
+        const wasActive = shield._isActive;
+        shield._isActive = active;
+
+        if (wasActive !== shield._isActive) {
+            if (!this._isKeepAwakeEnabledNow() || this._keepAwakeActiveOnce) {
+                shield.emit('active-changed');
+                this._keepAwakeActiveOnce = false;
+            }
+        }
+
+        if (active) {
+            this._startKeepAwakeTimerIfNeeded();
+        } else {
+            this._clearKeepAwakeTimer();
+        }
+
+        if (shield._loginSession)
+            shield._loginSession.SetLockedHintRemote(active);
+
+        shield._syncInhibitor();
+    }
+
+    _clearKeepAwakeTimer() {
+        if (this._lockKeepAwakePulseId) {
+            GLib.Source.remove(this._lockKeepAwakePulseId);
+            this._lockKeepAwakePulseId = null;
+        }
+        if (this._lockKeepAwakeTimeoutId) {
+            GLib.Source.remove(this._lockKeepAwakeTimeoutId);
+            this._lockKeepAwakeTimeoutId = null;
+        }
+    }
+
+    _startKeepAwakeTimerIfNeeded() {
+        this._clearKeepAwakeTimer();
+        if (!this._settings)
+            return;
+        if (Main.sessionMode.currentMode !== 'unlock-dialog')
+            return;
+        if (!this._isKeepAwakeEnabledNow())
+            return;
+
+        // Keep lock screen visible while timer is active.
+        this._pokeLockscreen();
+        this._lockKeepAwakePulseId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 15, () => {
+            if (Main.sessionMode.currentMode !== 'unlock-dialog')
+                return GLib.SOURCE_REMOVE;
+            this._pokeLockscreen();
+            return GLib.SOURCE_CONTINUE;
+        });
+        GLib.Source.set_name_by_id(this._lockKeepAwakePulseId, '[livelockpaper] lock-keep-awake-pulse');
+
+        const timeout = Math.max(0, this._settings.get_int(Keys.LOCKSCREEN_KEEP_AWAKE_TIMEOUT_SECONDS));
+        if (timeout > 0) {
+            this._lockKeepAwakeTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, timeout, () => {
+                this._lockKeepAwakeTimeoutId = null;
+                this._clearKeepAwakeTimer();
+                // Stop wake-ups and let GNOME's native blank timeout handle blackout.
+                this._keepAwakeActiveOnce = true;
+                try { Main.screenShield?.emit?.('active-changed'); } catch (_) {}
+                return GLib.SOURCE_REMOVE;
+            });
+            GLib.Source.set_name_by_id(this._lockKeepAwakeTimeoutId, '[livelockpaper] lock-keep-awake-timeout');
+        }
+    }
+
+    _restartKeepAwakeTimerIfNeeded() {
+        if (Main.sessionMode.currentMode !== 'unlock-dialog')
+            return;
+        this._startKeepAwakeTimerIfNeeded();
     }
 
     _hasBatteryDevice() {
@@ -1062,6 +1573,15 @@ export default class LockscreenExtension extends Extension {
             return;
 
         if (this._wpPlayerProcess) {
+            if (this._wpSubprocessStates && this._wpSubprocessStates.length > 0) {
+                for (const state of this._wpSubprocessStates) {
+                    if (!state?.videoPaths || state.videoPaths.length <= 1)
+                        continue;
+                    const nextPath = this._wpSelectNextVideoFor(state);
+                    if (nextPath)
+                        this._startPlayCountTracking(Keys.WALLPAPER_VIDEO_METADATA, nextPath);
+                }
+            }
             this._wpPlayerProcess.next();
             this._syncStatusIndicator();
             return;
@@ -1238,28 +1758,7 @@ export default class LockscreenExtension extends Extension {
 
         // Track play count when video starts
         this._incrementPlayCount = (videoPath) => {
-            try {
-                let metadata = this._settings.get_value(Keys.VIDEO_METADATA).recursiveUnpack();
-                if (!metadata) metadata = {};
-                if (!metadata[videoPath]) metadata[videoPath] = {};
-                
-                const currentCount = metadata[videoPath].playCount || 0;
-                metadata[videoPath].playCount = currentCount + 1;
-                
-                const variantDict = {};
-                for (const [key, value] of Object.entries(metadata)) {
-                    const valueDict = {};
-                    if (value.fps !== undefined) valueDict['fps'] = new GLib.Variant('i', value.fps);
-                    if (value.width !== undefined) valueDict['width'] = new GLib.Variant('i', value.width);
-                    if (value.height !== undefined) valueDict['height'] = new GLib.Variant('i', value.height);
-                    if (value.duration !== undefined) valueDict['duration'] = new GLib.Variant('i', value.duration);
-                    if (value.playCount !== undefined) valueDict['playCount'] = new GLib.Variant('i', value.playCount);
-                    variantDict[key] = new GLib.Variant('a{sv}', valueDict);
-                }
-                this._settings.set_value(Keys.VIDEO_METADATA, new GLib.Variant('a{sv}', variantDict));
-            } catch (e) {
-                console.log('Error incrementing play count:', e);
-            }
+            this._incrementPlayCountForMetadataKey(Keys.VIDEO_METADATA, videoPath);
         };
 
         // Force gpuColorConversion OFF for lock screen (GL contexts can deadlock during lock transition)
@@ -1292,6 +1791,7 @@ export default class LockscreenExtension extends Extension {
             console.warning('Failed to select initial video, falling back')
             return;
         }
+        this._startPlayCountTracking(Keys.VIDEO_METADATA, initialVideoPath);
         this._discoverVideoProperties(initialVideoPath);
         
         const initialFramerate = this._getFramerateForVideo(initialVideoPath);
@@ -1370,6 +1870,8 @@ export default class LockscreenExtension extends Extension {
                 };
             }
         );
+
+        this._applyLockscreenTextCustomization();
     }
 
     // Subprocess lock screen (gtk4paintablesink)
@@ -1435,6 +1937,7 @@ export default class LockscreenExtension extends Extension {
         videoPaths = videoPaths.filter(p => p && p.trim() && GLib.file_test(p, GLib.FileTest.EXISTS));
 
         const lockscreenPerMonitor = this._settings.get_boolean(Keys.LOCKSCREEN_PER_MONITOR);
+        const randomOrder = this._settings.get_boolean(Keys.VIDEO_RANDOM_ORDER);
         let lockPerMonitorConfig = {};
         if (lockscreenPerMonitor) {
             try { lockPerMonitorConfig = JSON.parse(this._settings.get_string(Keys.LOCKSCREEN_PER_MONITOR_CONFIG)); }
@@ -1448,6 +1951,7 @@ export default class LockscreenExtension extends Extension {
         if (lockscreenPerMonitor) {
             // Build connector map
             const connectorMap = {};
+            const usedInitialVideos = new Set();
             try {
                 const mm = global.backend.get_monitor_manager();
                 for (const lm of mm.get_logical_monitors()) {
@@ -1461,7 +1965,18 @@ export default class LockscreenExtension extends Extension {
                 const rawPaths = lockPerMonitorConfig[conn] || lockPerMonitorConfig[`Monitor-${i}`] || lockPerMonitorConfig[String(i)] || [];
                 let paths = rawPaths.filter(p => p && p.trim() && GLib.file_test(p, GLib.FileTest.EXISTS));
                 if (paths.length === 0) paths = videoPaths; // fallback to shared
-                subprocessMonitors.push({ videos: paths });
+                const state = {
+                    videoPaths: paths,
+                    currentIndex: -1,
+                    randomOrder,
+                };
+                const selected = this._selectUniqueInitialVideo(state, usedInitialVideos);
+                if (selected)
+                    this._startPlayCountTracking(Keys.VIDEO_METADATA, selected);
+                subprocessMonitors.push({
+                    videos: paths,
+                    initialIndex: state.currentIndex,
+                });
             }
         } else {
             if (videoPaths.length === 0) {
@@ -1469,7 +1984,18 @@ export default class LockscreenExtension extends Extension {
                 return;
             }
             // Shared: one monitor config entry, player.js will share the paintable
-            subprocessMonitors.push({ videos: videoPaths });
+            const state = {
+                videoPaths,
+                currentIndex: -1,
+                randomOrder,
+            };
+            const selected = this._wpSelectNextVideoFor(state);
+            if (selected)
+                this._startPlayCountTracking(Keys.VIDEO_METADATA, selected);
+            subprocessMonitors.push({
+                videos: videoPaths,
+                initialIndex: state.currentIndex,
+            });
         }
 
         // Settings for subprocess
@@ -1502,7 +2028,6 @@ export default class LockscreenExtension extends Extension {
         };
 
         // Spawn the subprocess
-        const randomOrder = this._settings.get_boolean(Keys.VIDEO_RANDOM_ORDER);
         const config = {
             scalingMode,
             volume,
@@ -1605,6 +2130,7 @@ export default class LockscreenExtension extends Extension {
             );
 
             Main.screenShield._dialog._updateBackgrounds();
+            this._applyLockscreenTextCustomization();
         }, (err) => {
             console.error(`[LockScreen:GTK4] ${err}`);
             // Restore animation override
@@ -1781,7 +2307,21 @@ export default class LockscreenExtension extends Extension {
     }
 
     _disableLockScreen() {
+        // Stop all lockscreen play count tracking
+        for (const [key, tracking] of this._playCountTracking.entries()) {
+            if (tracking.metadataKey === Keys.VIDEO_METADATA) {
+                this._stopPlayCountTracking(key);
+            }
+        }
         this._hideLockStartupCover();
+        this._clearLockTextTimer();
+        this._clearLockTextCommandState();
+        this._clearKeepAwakeTimer();
+        try { this._lockTextCmdLabel?.destroy(); } catch (_) {}
+        try { this._lockTextOverlayLayer?.destroy(); } catch (_) {}
+        this._lockTextCmdLabel = null;
+        this._lockTextOverlayLayer = null;
+        this._lockTextOverlayBinLayout = null;
         if (this._lockRetryId) {
             GLib.Source.remove(this._lockRetryId);
             this._lockRetryId = null;
@@ -1999,6 +2539,7 @@ export default class LockscreenExtension extends Extension {
             const videoPath = this._selectUniqueInitialVideo(state, this._lockUsedInitialVideos);
             if (!videoPath) return;
             this._lockUsedInitialVideos.add(videoPath);
+            this._startPlayCountTracking(Keys.VIDEO_METADATA, videoPath);
 
             // Discover dimensions
             let dims = { width: monitor.width, height: monitor.height };
@@ -2356,6 +2897,11 @@ export default class LockscreenExtension extends Extension {
     }
 
     _onVideoEnd() {
+        // Stop tracking previous video
+        if (this._currentVideoPath) {
+            this._stopPlayCountTracking(`${Keys.VIDEO_METADATA}:${this._currentVideoPath}`);
+        }
+
         // Select next video (random or sequential based on setting)
         const newVideoPath = this._selectNextVideo();
         if (!newVideoPath) {
@@ -2365,8 +2911,8 @@ export default class LockscreenExtension extends Extension {
         
         console.log(`[LiveLockPaper] Switching to new video: ${newVideoPath}`);
         
-        // Increment play count
-        this._incrementPlayCount(newVideoPath);
+        // Start tracking play count
+        this._startPlayCountTracking(Keys.VIDEO_METADATA, newVideoPath);
         
         // Discover properties of new video
         this._discoverVideoProperties(newVideoPath);
@@ -2390,13 +2936,20 @@ export default class LockscreenExtension extends Extension {
         const state = this._lockMonitorStates[pipelineIndex];
         if (!state) return;
 
+        // Stop tracking previous video for this monitor (before currentIndex is updated)
+        const prevIndex = state.currentIndex >= 0 ? state.currentIndex : 0;
+        const prevVideoPath = state.videoPaths[prevIndex];
+        if (prevVideoPath) {
+            this._stopPlayCountTracking(`${Keys.VIDEO_METADATA}:${prevVideoPath}`);
+        }
+
         const newVideoPath = this._wpSelectNextVideoFor(state);
         if (!newVideoPath) return;
 
         console.log(`[LockScreen] Pipeline ${pipelineIndex} switching to: ${newVideoPath.split('/').pop()}`);
 
         const framerate = this._getFramerateForVideo(newVideoPath);
-        this._incrementPlayCount(newVideoPath);
+        this._startPlayCountTracking(Keys.VIDEO_METADATA, newVideoPath);
 
         if (this._lockPipelines && this._lockPipelines[pipelineIndex]) {
             this._lockPipelines[pipelineIndex].changeVideo(newVideoPath, framerate);
@@ -2606,6 +3159,7 @@ export default class LockscreenExtension extends Extension {
                 const tgtW = Math.round(monitor.width * WP_QUALITY);
                 const tgtH = Math.round(monitor.height * WP_QUALITY);
                 const framerate = this._getWallpaperFramerate(videoPath);
+                this._startPlayCountTracking(Keys.WALLPAPER_VIDEO_METADATA, videoPath);
                 const staggerMs = activeMonitorCount > 1
                     ? Math.round((1000 / framerate) / activeMonitorCount) * pipelineIndex
                     : 0;
@@ -2673,6 +3227,7 @@ export default class LockscreenExtension extends Extension {
                 this._setupWallpaperSettingsWatch();
                 return;
             }
+            this._startPlayCountTracking(Keys.WALLPAPER_VIDEO_METADATA, videoPath);
 
             const dims = discoverDimensions(videoPath, 1920, 1080);
 
@@ -2802,6 +3357,7 @@ export default class LockscreenExtension extends Extension {
 
         if (perMonitor) {
             let config = {};
+            const usedInitialVideos = new Set();
             try { config = JSON.parse(this._settings.get_string(Keys.WALLPAPER_PER_MONITOR_CONFIG)); }
             catch (e) { config = {}; }
 
@@ -2820,21 +3376,43 @@ export default class LockscreenExtension extends Extension {
                 let paths = rawPaths.filter(p => p && p.trim() && GLib.file_test(p, GLib.FileTest.EXISTS));
                 // Always push an entry; fallback to shared videos.
                 if (paths.length === 0) paths = wpVideoPaths;
+                const state = {
+                    videoPaths: paths,
+                    currentIndex: -1,
+                    randomOrder,
+                };
+                const selected = this._selectUniqueInitialVideo(state, usedInitialVideos);
+                if (selected)
+                    this._startPlayCountTracking(Keys.WALLPAPER_VIDEO_METADATA, selected);
                 subprocessMonitors.push({
                     videos: paths,
+                    initialIndex: state.currentIndex,
                     width: monitors[i].width,
                     height: monitors[i].height,
                 });
             }
         } else {
             if (wpVideoPaths.length > 0) {
+                const state = {
+                    videoPaths: wpVideoPaths,
+                    currentIndex: -1,
+                    randomOrder,
+                };
+                const selected = this._wpSelectNextVideoFor(state);
+                if (selected)
+                    this._startPlayCountTracking(Keys.WALLPAPER_VIDEO_METADATA, selected);
                 let maxW = 0;
                 let maxH = 0;
                 for (const m of monitors) {
                     if (m.width > maxW) maxW = m.width;
                     if (m.height > maxH) maxH = m.height;
                 }
-                subprocessMonitors.push({ videos: wpVideoPaths, width: maxW, height: maxH });
+                subprocessMonitors.push({
+                    videos: wpVideoPaths,
+                    initialIndex: state.currentIndex,
+                    width: maxW,
+                    height: maxH,
+                });
             }
         }
 
@@ -2845,6 +3423,11 @@ export default class LockscreenExtension extends Extension {
             return;
         }
         this._wpSubprocessMonitorVideos = subprocessMonitors.map(m => m.videos || []);
+        this._wpSubprocessStates = subprocessMonitors.map(m => ({
+            videoPaths: Array.isArray(m.videos) ? m.videos : [],
+            currentIndex: Number.isInteger(m.initialIndex) ? m.initialIndex : -1,
+            randomOrder,
+        }));
 
         const playerConfig = {
             scalingMode,
@@ -3382,6 +3965,7 @@ export default class LockscreenExtension extends Extension {
             this._wpPlayerProcess.destroy();
             this._wpPlayerProcess = null;
         }
+        this._wpSubprocessStates = [];
 
         if (this._wpPipelines) {
             this._wpPipelines.forEach(p => p.destroy());
@@ -3782,6 +4366,12 @@ export default class LockscreenExtension extends Extension {
     }
 
     _disableWallpaper() {
+        // Stop all wallpaper play count tracking
+        for (const [key, tracking] of this._playCountTracking.entries()) {
+            if (tracking.metadataKey === Keys.WALLPAPER_VIDEO_METADATA) {
+                this._stopPlayCountTracking(key);
+            }
+        }
         this._wallpaperWasPaused = false;
         this._manualWallpaperPaused = false;
         // Disconnect settings watchers
@@ -3792,6 +4382,155 @@ export default class LockscreenExtension extends Extension {
             this._wpSettingsIds = [];
         }
         this._teardownWallpaper();
+    }
+
+    _getNumericMetadataValue(value) {
+        if (value === null || value === undefined)
+            return null;
+        if (typeof value === 'number')
+            return Number.isFinite(value) ? value : null;
+        if (typeof value === 'object') {
+            try {
+                if (typeof value.get_int32 === 'function')
+                    return value.get_int32();
+                if (typeof value.get_uint32 === 'function')
+                    return value.get_uint32();
+                if (typeof value.get_double === 'function')
+                    return value.get_double();
+                if (typeof value.recursiveUnpack === 'function')
+                    return this._getNumericMetadataValue(value.recursiveUnpack());
+            } catch (_) {}
+        }
+        return null;
+    }
+
+    // Play count tracking: hybrid approach (50% duration OR 10 seconds, whichever comes first)
+    _playCountTracking = new Map(); // key: `${metadataKey}:${videoPath}`, value: { timerId, startTime, metadataKey, videoPath }
+
+    _startPlayCountTracking(metadataKey, videoPath) {
+        if (!videoPath || !this._settings)
+            return;
+
+        // Stop any existing tracking for this video
+        const trackingKey = `${metadataKey}:${videoPath}`;
+        this._stopPlayCountTracking(trackingKey);
+
+        // Get video duration from metadata
+        let duration = null;
+        try {
+            const metadata = this._settings.get_value(metadataKey).recursiveUnpack() ?? {};
+            if (metadata[videoPath]) {
+                duration = this._getNumericMetadataValue(metadata[videoPath].duration);
+            }
+        } catch (_) {}
+
+        // Calculate thresholds
+        const minTimeSeconds = 10; // Minimum 10 seconds
+        const minDurationPercent = 0.5; // 50% of video duration
+        const minDurationSeconds = duration ? Math.max(1, Math.round(duration * minDurationPercent)) : null;
+
+        // If video is very short (< 10s), count immediately
+        if (duration && duration < minTimeSeconds) {
+            this._incrementPlayCountForMetadataKey(metadataKey, videoPath);
+            return;
+        }
+
+        // Start tracking
+        const startTime = Date.now();
+        const tracking = {
+            startTime,
+            metadataKey,
+            videoPath,
+            minTimeSeconds,
+            minDurationSeconds,
+            duration,
+        };
+
+        // Check threshold every second
+        const timerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 1, () => {
+            return this._checkPlayCountThreshold(trackingKey, tracking);
+        });
+
+        tracking.timerId = timerId;
+        this._playCountTracking.set(trackingKey, tracking);
+    }
+
+    _checkPlayCountThreshold(trackingKey, tracking) {
+        const { startTime, metadataKey, videoPath, minTimeSeconds, minDurationSeconds, duration } = tracking;
+        const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+
+        // Check if minimum time threshold reached
+        if (elapsedSeconds >= minTimeSeconds) {
+            this._incrementPlayCountForMetadataKey(metadataKey, videoPath);
+            this._stopPlayCountTracking(trackingKey);
+            return GLib.SOURCE_REMOVE;
+        }
+
+        // Check if duration percentage threshold reached (if we have duration)
+        if (minDurationSeconds !== null && elapsedSeconds >= minDurationSeconds) {
+            this._incrementPlayCountForMetadataKey(metadataKey, videoPath);
+            this._stopPlayCountTracking(trackingKey);
+            return GLib.SOURCE_REMOVE;
+        }
+
+        // Continue tracking
+        return GLib.SOURCE_CONTINUE;
+    }
+
+    _stopPlayCountTracking(trackingKey) {
+        const tracking = this._playCountTracking.get(trackingKey);
+        if (tracking && tracking.timerId) {
+            GLib.Source.remove(tracking.timerId);
+            this._playCountTracking.delete(trackingKey);
+        }
+    }
+
+    _stopAllPlayCountTracking() {
+        for (const [key, tracking] of this._playCountTracking.entries()) {
+            if (tracking.timerId) {
+                GLib.Source.remove(tracking.timerId);
+            }
+        }
+        this._playCountTracking.clear();
+    }
+
+    _incrementPlayCountForMetadataKey(metadataKey, videoPath) {
+        if (!videoPath || !this._settings)
+            return;
+        try {
+            let metadata = {};
+            try {
+                metadata = this._settings.get_value(metadataKey).recursiveUnpack() ?? {};
+            } catch (_) {
+                metadata = {};
+            }
+            if (!metadata[videoPath] || typeof metadata[videoPath] !== 'object')
+                metadata[videoPath] = {};
+
+            const currentCount = this._getNumericMetadataValue(metadata[videoPath].playCount) ?? 0;
+            metadata[videoPath].playCount = currentCount + 1;
+
+            const variantDict = {};
+            for (const [key, value] of Object.entries(metadata)) {
+                const valueDict = {};
+                const fps = this._getNumericMetadataValue(value?.fps);
+                const width = this._getNumericMetadataValue(value?.width);
+                const height = this._getNumericMetadataValue(value?.height);
+                const duration = this._getNumericMetadataValue(value?.duration);
+                const playCount = this._getNumericMetadataValue(value?.playCount) ?? 0;
+
+                if (fps !== null) valueDict.fps = new GLib.Variant('i', Math.round(fps));
+                if (width !== null) valueDict.width = new GLib.Variant('i', Math.round(width));
+                if (height !== null) valueDict.height = new GLib.Variant('i', Math.round(height));
+                if (duration !== null) valueDict.duration = new GLib.Variant('i', Math.round(duration));
+                valueDict.playCount = new GLib.Variant('i', Math.max(0, Math.round(playCount)));
+                variantDict[key] = new GLib.Variant('a{sv}', valueDict);
+            }
+
+            this._settings.set_value(metadataKey, new GLib.Variant('a{sv}', variantDict));
+        } catch (e) {
+            console.log(`[LiveLockPaper] Error incrementing play count for ${videoPath}: ${e}`);
+        }
     }
 
     _getWallpaperFramerate(videoPath) {
@@ -3866,12 +4605,20 @@ export default class LockscreenExtension extends Extension {
         const state = this._wpMonitorStates[pipelineIndex];
         if (!state) return;
 
+        // Stop tracking previous video for this monitor (before currentIndex is updated)
+        const prevIndex = state.currentIndex >= 0 ? state.currentIndex : 0;
+        const prevVideoPath = state.videoPaths[prevIndex];
+        if (prevVideoPath) {
+            this._stopPlayCountTracking(`${Keys.WALLPAPER_VIDEO_METADATA}:${prevVideoPath}`);
+        }
+
         const newVideoPath = this._wpSelectNextVideoFor(state);
         if (!newVideoPath) return;
 
         console.log(`[Wallpaper] Pipeline ${pipelineIndex} switching to: ${newVideoPath.split('/').pop()}`);
 
         const framerate = this._getWallpaperFramerate(newVideoPath);
+        this._startPlayCountTracking(Keys.WALLPAPER_VIDEO_METADATA, newVideoPath);
 
         if (this._wpPipelines && this._wpPipelines[pipelineIndex]) {
             this._wpPipelines[pipelineIndex].changeVideo(newVideoPath, framerate);
