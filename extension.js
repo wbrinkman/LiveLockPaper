@@ -1673,9 +1673,11 @@ export default class LockscreenExtension extends Extension {
 
         this._injectionManager = null;
 
-        // Check battery — skip video lock screen to save power
+        // Check battery — skip video lock screen to save power, but keep text/keep-awake behavior active.
         if (this._settings.get_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY) && this._isOnBattery()) {
             console.log('[LockScreen] Skipping — device is on battery power');
+            this._applyLockscreenTextCustomization();
+            this._restartKeepAwakeTimerIfNeeded();
             return;
         }
 
@@ -1933,9 +1935,12 @@ export default class LockscreenExtension extends Extension {
         this._injectionManager = null;
         this._showLockStartupCover();
 
-        // Check battery
+        // Check battery — skip video lock screen to save power, but keep text/keep-awake behavior active.
         if (this._settings.get_boolean(Keys.LOCKSCREEN_DISABLE_ON_BATTERY) && this._isOnBattery()) {
             console.log('[LockScreen:GTK4] Skipping — device is on battery power');
+            this._hideLockStartupCover();
+            this._applyLockscreenTextCustomization();
+            this._restartKeepAwakeTimerIfNeeded();
             return;
         }
 
