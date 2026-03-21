@@ -56,15 +56,14 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         const lsKeepAwakeGroup = this._buildLockscreenKeepAwakeGroup(window);
         lockScreenSectionsGroup.add(lsKeepAwakeGroup);
 
-        // Disable lockscreen-specific groups when lock screen video is off.
+        // Disable lockscreen video-related groups when lock screen video is off.
+        // Lock Screen Text and Keep Awake remain independent from lockscreen video.
         const updateLockscreenSensitivity = () => {
             const enabled = window._settings.get_boolean(Keys.LOCKSCREEN_ENABLED);
             lsSingleVideoGroup.set_sensitive(enabled);
             lsPerMonitorGroup.set_sensitive(enabled);
             lsAppearanceGroup.set_sensitive(enabled);
             lsPromptGroup.set_sensitive(enabled);
-            lsTextGroup.set_sensitive(enabled);
-            lsKeepAwakeGroup.set_sensitive(enabled);
         };
         updateLockscreenSensitivity();
         window._settings.connect('changed::' + Keys.LOCKSCREEN_ENABLED, updateLockscreenSensitivity);

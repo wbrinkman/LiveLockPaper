@@ -346,8 +346,12 @@ export default class LockscreenExtension extends Extension {
             this._pauseWallpaper();
             if (lockscreenEnabled)
                 this._enableLockScreen();
-            else
+            else {
                 this._disableLockScreen();
+                // Keep lockscreen text customization independent from lockscreen video enablement.
+                this._applyLockscreenTextCustomization();
+                this._restartKeepAwakeTimerIfNeeded();
+            }
         } else if (mode === 'user') {
             // Desktop — tear down lock screen, resume wallpaper
             console.log('[LiveLockPaper] → tearing down lock screen, resuming wallpaper');
@@ -388,6 +392,11 @@ export default class LockscreenExtension extends Extension {
         this._disableLockScreen();
         if (this._settings?.get_boolean(Keys.LOCKSCREEN_ENABLED))
             this._enableLockScreen();
+        else {
+            // Runtime lockscreen video disable should not disable text customization.
+            this._applyLockscreenTextCustomization();
+            this._restartKeepAwakeTimerIfNeeded();
+        }
     }
 
     _onLockTextSettingsChanged() {
@@ -1616,6 +1625,10 @@ export default class LockscreenExtension extends Extension {
             if (this._settings && !this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED)) {
                 console.log('[LockScreen] Disabled by setting, skipping setup');
                 this._disableLockScreen();
+                if (Main.sessionMode.currentMode === 'unlock-dialog') {
+                    this._applyLockscreenTextCustomization();
+                    this._restartKeepAwakeTimerIfNeeded();
+                }
                 return;
             }
             console.log('[LockScreen] _enableLockScreen called');
