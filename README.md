@@ -43,6 +43,12 @@
 ### 🐛 Fixes
 
 - **Play count reliability** - Reworked play-count tracking and reset behavior for lockscreen and wallpaper modes, including GTK4 helper mode paths.
+- **Framerate settings vs GTK4** — The wallpaper/lock **GTK4 helper** had **`useVideorate` forced off**, so **manual framerate** and **auto-detect FPS** did not match what the UI implied. That is fixed: with **auto-detect off**, both GTK4 and appsink use **GStreamer `videorate`** so manual FPS caps output; with **auto on**, playback follows each file’s native timing.
+
+### 🔧 Playback, preferences, and performance (since v3.0.0)
+
+- **Hardware decode** — **Prefer hardware decoder** (Debug) raises VA-API / NVDEC plugin ranks for the **GTK4 helper process** as well as in-process appsink. It defaults to **on** for new installs; turn it off if playback glitches on your stack.
+- **Preferences** — Large playlists: chunked list build and metadata detection, queued **ffmpeg** thumbnails (friendlier to 4K/HEVC), thumbnails reattach after list refreshes. Logs prefixed with **`[LLPrefs]`** when you run **`gnome-extensions prefs <uuid>`** from a terminal.
 
 ---
 
@@ -51,7 +57,7 @@
 - **🎥 Video Lock Screen + Desktop Wallpaper** — Use videos on lock screen and desktop.
 - **🖥️ Per-Monitor Playback** — Assign videos per display with playlist support.
 - **🎶 Multi-Video Playlists** — Add files/folders, then play sequentially or randomly.
-- **📊 Auto FPS Detection** — Uses source framerate automatically for smoother playback.
+- **📊 Auto FPS + manual cap** — Auto follows each file’s native framerate; with auto off, manual FPS caps playback via GStreamer (`videorate`) on both GTK4 and appsink.
 - **🎨 Flexible Scaling** — Cover, fit, or stretch to match your layout.
 - **🌫️ Blur + Prompt Effects** — Adjustable blur/brightness and password prompt behavior (including grayscale option).
 - **🔊 Optional Audio** — Volume control with fade-in/out support.
@@ -91,6 +97,7 @@ These defaults are aimed at sensible behavior out of the box:
 - **Wallpaper disable on battery:** enabled (saves battery on laptops)
 - **Pause wallpaper when hidden:** Any monitor (pauses when any monitor is covered)
 - **Force legacy appsink renderer:** disabled (GTK4 renderer path remains default)
+- **Prefer hardware decoder:** enabled (VA-API / NVDEC rank boost for both GTK4 helper and appsink; disable if a video fails)
 - **Verbose logging:** disabled (enable for troubleshooting)
 
 ---
@@ -177,7 +184,8 @@ sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0
 
 - GTK4 (`gtk4paintablesink`) is the default renderer and is usually the most performant path.
 - The Debug menu includes an option to force the legacy appsink renderer for comparison and troubleshooting.
-- Some debug/performance toggles are appsink-only and are dynamically disabled while GTK4 mode is active.
+- **Prefer hardware decoder** applies to **both** GTK4 and appsink (the GTK helper runs `boostHwDecoderRanks()` when the toggle is on).
+- **GPU colour conversion** and **adaptive frame polling** are **appsink-only**; their controls are disabled in the UI while GTK4 mode is active.
 - In multi-monitor wallpaper mode on Wayland, helper windows are kept internal and pinned for window-manager stability to keep the secondary-monitor dock visible after unlock.
 - Helper windows use improved skip_taskbar handling for better dock compatibility on Wayland.
 
@@ -218,7 +226,7 @@ This helps save CPU/GPU resources when the wallpaper isn't visible.
 - Brief green frame at video start — enable **"Skip first frame"** in Debug settings to fix.
 - Possible clicking/crackling sounds when pausing/playing video with audio.
 - Performance issues and shell crashes with high-res videos (hardware dependent).
-- **Video wallpaper** uses GPU/CPU continuously — higher framerates and per-monitor mode use more resources.
+- **Video wallpaper** uses GPU/CPU continuously — higher framerates and per-monitor mode use more resources. **4K at very high fps** (e.g. 120–240) may exceed hardware decode limits or stress the compositor; prefer **auto off + lower manual FPS**, **lower render quality**, or **re-encoded** clips for wallpaper.
 - Most settings apply immediately; a few session-level changes may still need an extension reload.
 - Window positioning may need adjustment when settings window is on a different monitor (work in progress).
 
