@@ -18,6 +18,11 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         window._settings = this.getSettings();
         window.set_default_size(600, 700);
+
+        // Limit concurrent ffmpeg thumbnail spawns so huge folders don’t freeze prefs.
+        this._thumbGenActive = 0;
+        this._thumbGenPending = [];
+        this._thumbGenMaxConcurrent = 4;
         
         // Validate videos on startup
         this._validateVideos(window);
@@ -983,7 +988,6 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         );
         group.add_row(gpuCCSwitch);
 
-        const hwDecoderDefaultSubtitle = 'Prefer VA-API/NVDEC over software decoding when available.';
         const gpuCCDefaultSubtitle = 'Use OpenGL for YUV to BGRA conversion (appsink path only).';
         const adaptiveDefaultSubtitle = 'Poll quickly when frames are ready, back off when they are not.';
         const appsinkOnlySuffix = 'Appsink-only (disabled while GTK4 renderer is active).';
@@ -992,13 +996,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             const forceAppsink = window._settings.get_boolean(Keys.DEBUG_USE_GTK4_SINK);
             const usingGtkRenderer = !forceAppsink;
 
-            hwDecoderSwitch.set_sensitive(!usingGtkRenderer);
             gpuCCSwitch.set_sensitive(!usingGtkRenderer);
             adaptivePollingSwitch.set_sensitive(!usingGtkRenderer);
 
-            hwDecoderSwitch.set_subtitle(
-                usingGtkRenderer ? `${appsinkOnlySuffix} ${hwDecoderDefaultSubtitle}` : hwDecoderDefaultSubtitle
-            );
             gpuCCSwitch.set_subtitle(
                 usingGtkRenderer ? `${appsinkOnlySuffix} ${gpuCCDefaultSubtitle}` : gpuCCDefaultSubtitle
             );
@@ -1434,7 +1434,6 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                         margin_bottom: 4,
                     });
 
-                    // Keep thumbnail width stable so rows align cleanly.
                     const thumbnailBox = new Gtk.Box({
                         orientation: Gtk.Orientation.VERTICAL,
                         width_request: 100,
@@ -1454,9 +1453,8 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                     });
                     thumbnailImage.set_paintable(null);
                     thumbnailBox.append(thumbnailImage);
+                    this._loadVideoThumbnail(path, thumbnailImage, listBox);
                     rowBox.append(thumbnailBox);
-                    
-                    this._loadVideoThumbnail(path, thumbnailImage);
 
                     const infoBox = new Gtk.Box({
                         orientation: Gtk.Orientation.VERTICAL,
@@ -1878,7 +1876,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 Gst.init([]);
             }
             
-            const discoverer = new GstPbutils.Discoverer({ timeout: 3 * Gst.SECOND });
+            const discoverer = new GstPbutils.Discoverer({ timeout: 2 * Gst.SECOND });
             const uri = GLib.filename_to_uri(videoPath, null);
             const info = discoverer.discover_uri(uri);
             
@@ -2128,136 +2126,165 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
     _updateVideoMetadata(videoPaths, window, metadataKey = Keys.VIDEO_METADATA, refreshCallback = null) {
         try {
+            const idleMap = window._lpsMetadataIdleByKey ?? (window._lpsMetadataIdleByKey = {});
+            const deferMap = window._lpsMetadataDeferByKey ?? (window._lpsMetadataDeferByKey = {});
+            const prevIdle = idleMap[metadataKey];
+            if (prevIdle) {
+                try {
+                    GLib.Source.remove(prevIdle);
+                } catch (e) { }
+                idleMap[metadataKey] = 0;
+            }
+            const prevDefer = deferMap[metadataKey];
+            if (prevDefer) {
+                try {
+                    GLib.Source.remove(prevDefer);
+                } catch (e) { }
+                deferMap[metadataKey] = 0;
+            }
+
             let metadata = {};
             try {
                 const currentMetadata = window._settings.get_value(metadataKey).recursiveUnpack();
-                if (currentMetadata) {
+                if (currentMetadata)
                     metadata = currentMetadata;
-                }
             } catch (e) {
                 metadata = {};
             }
-            
-            let updated = false;
-            const detectPromises = [];
-            
-            videoPaths.forEach(path => {
+
+            const checkValue = (val) => {
+                if (val === null || val === undefined) return false;
+                if (typeof val === 'object' && val.constructor && val.constructor.name === 'Variant') {
+                    try {
+                        const unpacked = val.recursiveUnpack();
+                        return unpacked !== null && unpacked !== undefined;
+                    } catch (err) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            const queue = [];
+            for (const path of videoPaths) {
                 let needsDetection = false;
                 if (!metadata[path]) {
                     needsDetection = true;
                 } else {
                     const existing = metadata[path];
-                    let hasWidth = false, hasFps = false, hasDuration = false;
-                    const checkValue = (val) => {
-                        if (val === null || val === undefined) return false;
-                        if (typeof val === 'object' && val.constructor && val.constructor.name === 'Variant') {
-                            try {
-                                const unpacked = val.recursiveUnpack();
-                                return unpacked !== null && unpacked !== undefined;
-                            } catch (e) {
-                                return false;
-                            }
-                        }
-                        return true;
-                    };
-                    if (existing.width && checkValue(existing.width)) {
-                        hasWidth = true;
-                    }
-                    if (existing.fps && checkValue(existing.fps)) {
-                        hasFps = true;
-                    }
-                    if (existing.duration && checkValue(existing.duration)) {
-                        hasDuration = true;
-                    }
-                    if (!hasWidth || !hasFps || !hasDuration) {
+                    const hasWidth = existing.width && checkValue(existing.width);
+                    const hasFps = existing.fps && checkValue(existing.fps);
+                    const hasDuration = existing.duration && checkValue(existing.duration);
+                    if (!hasWidth || !hasFps || !hasDuration)
                         needsDetection = true;
+                }
+                if (needsDetection)
+                    queue.push(path);
+            }
+
+            if (queue.length === 0)
+                return;
+
+            const LOGM = '[LLPrefs][Metadata]';
+            const tMeta0 = GLib.get_monotonic_time();
+            console.log(`${LOGM} scan ${queue.length} file(s) for ${metadataKey}`);
+
+            let updated = false;
+            let idx = 0;
+            const self = this;
+
+            const mergeOneDetection = (path, detected) => {
+                if (detected && (detected.fps || detected.width || detected.duration)) {
+                    if (metadata[path]) {
+                        const existing = metadata[path];
+                        const existingPlayCount = existing.playCount;
+                        if (detected.width) metadata[path].width = detected.width;
+                        if (detected.height) metadata[path].height = detected.height;
+                        if (detected.fps) metadata[path].fps = detected.fps;
+                        if (detected.duration) metadata[path].duration = detected.duration;
+                        if (existingPlayCount !== undefined && existingPlayCount !== null)
+                            metadata[path].playCount = existingPlayCount;
+                        else if (!metadata[path].playCount)
+                            metadata[path].playCount = 0;
+                    } else {
+                        metadata[path] = detected;
+                        if (!metadata[path].playCount)
+                            metadata[path].playCount = 0;
                     }
+                    updated = true;
+                } else {
+                    if (!metadata[path])
+                        metadata[path] = { playCount: 0 };
+                    else if (metadata[path].playCount === undefined || metadata[path].playCount === null)
+                        metadata[path].playCount = 0;
                 }
-                
-                if (needsDetection) {
-                    detectPromises.push(
-                        new Promise((resolve) => {
-                            try {
-                                console.log(`[Metadata] Detecting metadata for: ${path}`);
-                                const detected = this._detectVideoMetadata(path);
-                                console.log(`[Metadata] Detection result for ${path}:`, detected);
-                                if (detected && (detected.fps || detected.width || detected.duration)) {
-                                    if (metadata[path]) {
-                                        const existing = metadata[path];
-                                        const existingPlayCount = existing.playCount;
-                                        if (detected.width) metadata[path].width = detected.width;
-                                        if (detected.height) metadata[path].height = detected.height;
-                                        if (detected.fps) metadata[path].fps = detected.fps;
-                                        if (detected.duration) metadata[path].duration = detected.duration;
-                                        if (existingPlayCount !== undefined && existingPlayCount !== null) {
-                                            metadata[path].playCount = existingPlayCount;
-                                        } else if (!metadata[path].playCount) {
-                                            metadata[path].playCount = 0;
-                                        }
-                                    } else {
-                                        metadata[path] = detected;
-                                        if (!metadata[path].playCount) {
-                                            metadata[path].playCount = 0;
-                                        }
-                                    }
-                                    updated = true;
-                                    console.log(`Detected metadata for ${path}:`, detected);
-                                } else {
-                                    if (!metadata[path]) {
-                                        metadata[path] = { playCount: 0 };
-                                    } else if (metadata[path].playCount === undefined || metadata[path].playCount === null) {
-                                        metadata[path].playCount = 0;
-                                    }
-                                    console.log(`No metadata detected for ${path}`);
-                                }
-                            } catch (e) {
-                                console.log(`Error detecting metadata for ${path}:`, e);
-                            }
-                            resolve();
-                        })
-                    );
+            };
+
+            const saveMetadataVariant = () => {
+                const variantDict = {};
+                for (const [key, value] of Object.entries(metadata)) {
+                    const valueDict = {};
+                    if (value.fps !== undefined && value.fps !== null)
+                        valueDict.fps = new GLib.Variant('i', value.fps);
+                    if (value.width !== undefined && value.width !== null)
+                        valueDict.width = new GLib.Variant('i', value.width);
+                    if (value.height !== undefined && value.height !== null)
+                        valueDict.height = new GLib.Variant('i', value.height);
+                    if (value.duration !== undefined && value.duration !== null)
+                        valueDict.duration = new GLib.Variant('i', value.duration);
+                    const playCount = (value.playCount !== undefined && value.playCount !== null) ? value.playCount : 0;
+                    valueDict.playCount = new GLib.Variant('i', playCount);
+                    variantDict[key] = new GLib.Variant('a{sv}', valueDict);
                 }
-            });
-            
-            if (detectPromises.length > 0) {
-                Promise.all(detectPromises).then(() => {
+                const variant = new GLib.Variant('a{sv}', variantDict);
+                window._settings.set_value(metadataKey, variant);
+                if (refreshCallback)
+                    refreshCallback();
+                else if (window._updateVideoListCallback)
+                    window._updateVideoListCallback();
+            };
+
+            const onIdle = () => {
+                if (idx >= queue.length) {
+                    idleMap[metadataKey] = 0;
                     if (updated) {
                         try {
-                            const variantDict = {};
-                            for (const [key, value] of Object.entries(metadata)) {
-                                const valueDict = {};
-                                if (value.fps !== undefined && value.fps !== null) {
-                                    valueDict['fps'] = new GLib.Variant('i', value.fps);
-                                }
-                                if (value.width !== undefined && value.width !== null) {
-                                    valueDict['width'] = new GLib.Variant('i', value.width);
-                                }
-                                if (value.height !== undefined && value.height !== null) {
-                                    valueDict['height'] = new GLib.Variant('i', value.height);
-                                }
-                                if (value.duration !== undefined && value.duration !== null) {
-                                    valueDict['duration'] = new GLib.Variant('i', value.duration);
-                                    console.log(`[Metadata] Saving duration for ${key}: ${value.duration} seconds`);
-                                }
-                                const playCount = (value.playCount !== undefined && value.playCount !== null) ? value.playCount : 0;
-                                valueDict['playCount'] = new GLib.Variant('i', playCount);
-                                console.log(`[Metadata] Saving playCount for ${key}: ${playCount}`);
-                                variantDict[key] = new GLib.Variant('a{sv}', valueDict);
-                            }
-                            const variant = new GLib.Variant('a{sv}', variantDict);
-                            window._settings.set_value(metadataKey, variant);
-                            console.log(`[Metadata] Saved metadata variant for ${Object.keys(variantDict).length} videos`);
-                            
-                            if (refreshCallback) {
-                                refreshCallback();
-                            } else if (window._updateVideoListCallback) {
-                                window._updateVideoListCallback();
-                            }
+                            saveMetadataVariant();
+                            console.log(`${LOGM} save done in ${(GLib.get_monotonic_time() - tMeta0) / 1000}ms total`);
                         } catch (e) {
                             console.log('Error saving video metadata:', e);
                         }
+                    } else {
+                        console.log(`${LOGM} no new fields; skip save (${(GLib.get_monotonic_time() - tMeta0) / 1000}ms)`);
                     }
+                    return GLib.SOURCE_REMOVE;
+                }
+
+                const path = queue[idx++];
+                try {
+                    const detected = self._detectVideoMetadata(path);
+                    mergeOneDetection(path, detected);
+                } catch (e) {
+                    console.log(`Error detecting metadata for ${path}:`, e);
+                }
+                return GLib.SOURCE_CONTINUE;
+            };
+
+            const attachIdle = () => {
+                idleMap[metadataKey] = GLib.idle_add(GLib.PRIORITY_LOW, onIdle);
+            };
+
+            const deferLarge = queue.length > 24;
+            if (deferLarge) {
+                console.log(`${LOGM} deferring discover start 750ms (n=${queue.length})`);
+                deferMap[metadataKey] = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 750, () => {
+                    deferMap[metadataKey] = 0;
+                    console.log(`${LOGM} discover idle started`);
+                    attachIdle();
+                    return GLib.SOURCE_REMOVE;
                 });
+            } else {
+                attachIdle();
             }
         } catch (e) {
             console.log('Error updating video metadata:', e);
@@ -2338,9 +2365,8 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                         if (added) {
                             try {
                                 window._settings.set_strv(Keys.VIDEO_PATHS, currentPaths);
-                                // Detect metadata for new videos
                                 this._updateVideoMetadata(currentPaths, window);
-                                if (updateCallback) updateCallback();
+                                // List refresh: changed::VIDEO_PATHS
                             } catch (e) {
                                 console.log('Could not save video paths:', e);
                             }
@@ -2370,9 +2396,8 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                             currentPaths.push(newPath);
                             try {
                                 window._settings.set_strv(Keys.VIDEO_PATHS, currentPaths);
-                                // Detect metadata for new video
                                 this._updateVideoMetadata(currentPaths, window);
-                                if (updateCallback) updateCallback();
+                                // List refresh: changed::VIDEO_PATHS
                             } catch (e) {
                                 console.log('Could not save video paths:', e);
                             }
@@ -2475,7 +2500,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 }
 
                 this._updateVideoMetadata(replacementPaths, window);
-                if (updateCallback) updateCallback();
+                // List refresh comes from changed::VIDEO_PATHS (avoid double updateList + duplicate ffmpeg).
             } else {
                 console.log('No video files found in selected folder');
             }
@@ -2706,6 +2731,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             const pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(filePath, 100, 56, false);
             const texture = Gdk.Texture.new_for_pixbuf(pixbuf);
             pictureWidget.set_paintable(texture);
+            try {
+                pictureWidget.queue_draw();
+            } catch (e) { }
             return true;
         } catch (e) {
             console.log(`[Thumbnail] Error loading thumbnail from ${filePath}:`, e);
@@ -2713,64 +2741,129 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
         }
     }
 
-    _loadVideoThumbnail(videoPath, pictureWidget) {
+    // After a slow ffmpeg, the original Picture may be gone (list rebuilt). Find the current row by path.
+    _applyThumbnailToListVideoPath(listBox, videoPath, cachePath) {
+        if (!listBox?.get_parent?.())
+            return false;
+        let row = listBox.get_first_child();
+        while (row) {
+            if (row._videoPath === videoPath) {
+                const rowBox = row.get_child();
+                if (!rowBox) return false;
+                const thumbBox = rowBox.get_first_child();
+                if (!thumbBox) return false;
+                let w = thumbBox.get_first_child();
+                while (w) {
+                    if (w instanceof Gtk.Picture)
+                        return this._setThumbnailAtDisplaySize(w, cachePath);
+                    w = w.get_next_sibling();
+                }
+                return false;
+            }
+            row = row.get_next_sibling();
+        }
+        return false;
+    }
+
+    _pumpThumbnailGenQueue() {
+        while (this._thumbGenActive < this._thumbGenMaxConcurrent && this._thumbGenPending.length > 0) {
+            const job = this._thumbGenPending.shift();
+            if (!job?.videoPath || !job?.listBox?.get_parent?.())
+                continue;
+
+            this._thumbGenActive++;
+            const { videoPath, pictureWidget, listBox } = job;
+            const cachePath = this._getThumbnailCachePath(videoPath);
+            const quotedVideoPath = GLib.shell_quote(videoPath);
+            const quotedCachePath = GLib.shell_quote(cachePath);
+            // 4K / HEVC / 10-bit: larger probe, rgb output for PNG, skip unused streams.
+            // -ss before -i for fast seek when the container supports it.
+            const vf = 'scale=200:112:force_original_aspect_ratio=increase:flags=bilinear,crop=200:112,format=rgb24';
+            // No -hwaccel here: some builds fail fast and we’d poll for maxWait; SW decode is OK with long poll.
+            const ffmpegCommand =
+                `ffmpeg -hide_banner -loglevel error -nostdin -y ` +
+                `-analyzeduration 80M -probesize 80M -ss 1 ` +
+                `-i ${quotedVideoPath} ` +
+                `-map 0:v:0 -dn -sn -vf "${vf}" -vframes 1 -update 1 ${quotedCachePath}`;
+
+            const finish = () => {
+                this._thumbGenActive--;
+                this._pumpThumbnailGenQueue();
+            };
+
+            try {
+                GLib.spawn_command_line_async(ffmpegCommand);
+            } catch (e) {
+                console.log(`[Thumbnail] Failed to spawn ffmpeg for ${videoPath}:`, e);
+                finish();
+                continue;
+            }
+
+            const tSpawn = GLib.get_monotonic_time();
+            const pollIntervalMs = 400;
+            const maxWaitUs = 45 * 1000000; // seconds → µs (get_monotonic_time)
+            const pollThumb = () => {
+                try {
+                    if (!listBox.get_parent()) {
+                        finish();
+                        return GLib.SOURCE_REMOVE;
+                    }
+                    const file = Gio.File.new_for_path(cachePath);
+                    if (file.query_exists(null)) {
+                        const info = file.query_info('standard::size', Gio.FileQueryInfoFlags.NONE, null);
+                        if (info.get_size() > 0) {
+                            let ok = false;
+                            if (pictureWidget.get_parent())
+                                ok = this._setThumbnailAtDisplaySize(pictureWidget, cachePath);
+                            if (!ok)
+                                ok = this._applyThumbnailToListVideoPath(listBox, videoPath, cachePath);
+                            if (!ok)
+                                try { file.delete(null); } catch (de) {}
+                            finish();
+                            return GLib.SOURCE_REMOVE;
+                        }
+                        try { file.delete(null); } catch (de) {}
+                    }
+                } catch (e) {
+                    console.log(`[Thumbnail] poll error for ${videoPath}:`, e);
+                }
+                if (GLib.get_monotonic_time() - tSpawn > maxWaitUs) {
+                    console.log(`[Thumbnail] timeout after 45s (4K/HEVC often slow) — ${videoPath.split('/').pop()}`);
+                    finish();
+                    return GLib.SOURCE_REMOVE;
+                }
+                return GLib.SOURCE_CONTINUE;
+            };
+
+            GLib.timeout_add(GLib.PRIORITY_DEFAULT, pollIntervalMs, pollThumb);
+        }
+    }
+
+    _loadVideoThumbnail(videoPath, pictureWidget, listBox) {
         const cachePath = this._getThumbnailCachePath(videoPath);
         const cacheFile = Gio.File.new_for_path(cachePath);
-        
+
         if (cacheFile.query_exists(null)) {
             try {
                 const fileInfo = cacheFile.query_info('standard::size', Gio.FileQueryInfoFlags.NONE, null);
                 const fileSize = fileInfo.get_size();
                 if (fileSize > 0) {
-                    if (this._setThumbnailAtDisplaySize(pictureWidget, cachePath)) {
-                        console.log(`[Thumbnail] Using cached thumbnail for ${videoPath} (${fileSize} bytes)`);
+                    if (this._setThumbnailAtDisplaySize(pictureWidget, cachePath))
                         return;
-                    }
+                    if (listBox?.get_parent?.() && this._applyThumbnailToListVideoPath(listBox, videoPath, cachePath))
+                        return;
                 } else {
-                    console.log(`[Thumbnail] Deleting empty cached thumbnail for ${videoPath}`);
                     cacheFile.delete(null);
                 }
             } catch (e) {
                 console.log(`[Thumbnail] Error checking cached thumbnail for ${videoPath}:`, e);
             }
         }
-        
-        console.log(`[Thumbnail] Generating thumbnail for ${videoPath}`);
-        
-        const quotedVideoPath = GLib.shell_quote(videoPath);
-        const quotedCachePath = GLib.shell_quote(cachePath);
-        
-        // Generate at 2x and downscale on load for sharper thumbnails.
-        const ffmpegCommand = `ffmpeg -y -ss 1 -i ${quotedVideoPath} -vframes 1 -update 1 -vf "scale=200:112:force_original_aspect_ratio=increase,crop=200:112" ${quotedCachePath}`;
-        console.log(`[Thumbnail] Command: ${ffmpegCommand}`);
-        
-        try {
-            GLib.spawn_command_line_async(ffmpegCommand);
-        } catch (e) {
-            console.log(`[Thumbnail] Failed to spawn ffmpeg for ${videoPath}:`, e);
+
+        if (!listBox)
             return;
-        }
-        
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 3000, () => {
-            try {
-                const file = Gio.File.new_for_path(cachePath);
-                if (file.query_exists(null)) {
-                    const info = file.query_info('standard::size', Gio.FileQueryInfoFlags.NONE, null);
-                    if (info.get_size() > 0) {
-                        this._setThumbnailAtDisplaySize(pictureWidget, cachePath);
-                        console.log(`[Thumbnail] Loaded thumbnail for ${videoPath} (${info.get_size()} bytes)`);
-                    } else {
-                        try { file.delete(null); } catch(de) {}
-                        console.log(`[Thumbnail] Empty thumbnail file for ${videoPath}`);
-                    }
-                } else {
-                    console.log(`[Thumbnail] Thumbnail not created for ${videoPath}, ffmpeg may have failed`);
-                }
-            } catch (e) {
-                console.log(`[Thumbnail] Error checking thumbnail for ${videoPath}:`, e);
-            }
-            return false;
-        });
+        this._thumbGenPending.push({ videoPath, pictureWidget, listBox });
+        this._pumpThumbnailGenQueue();
     }
 
     // Wallpaper preferences
@@ -3018,8 +3111,19 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             return val;
         };
 
+        const LOGP = '[LLPrefs][VideoList]';
+
         const updateList = () => {
-            // Clear existing children
+            const tAll = GLib.get_monotonic_time();
+            if (listBox._lpsChunkIdle) {
+                try {
+                    GLib.Source.remove(listBox._lpsChunkIdle);
+                } catch (e) { }
+                listBox._lpsChunkIdle = 0;
+            }
+            listBox._lpsBuildGen = (listBox._lpsBuildGen ?? 0) + 1;
+            const buildGen = listBox._lpsBuildGen;
+
             let child = listBox.get_first_child();
             while (child) {
                 const next = child.get_next_sibling();
@@ -3028,6 +3132,174 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
             }
 
             const currentPaths = getPaths();
+
+            let metadataCache = null;
+            try {
+                metadataCache = window._settings.get_value(metadataKey).recursiveUnpack();
+            } catch (e) {
+                metadataCache = {};
+            }
+
+            const appendRow = (path, index, pathsSnap, meta) => {
+                const row = new Gtk.ListBoxRow();
+                const rowBox = new Gtk.Box({
+                    orientation: Gtk.Orientation.HORIZONTAL,
+                    spacing: 8,
+                    margin_start: 8, margin_end: 8,
+                    margin_top: 4, margin_bottom: 4,
+                });
+
+                const thumbnailBox = new Gtk.Box({
+                    orientation: Gtk.Orientation.VERTICAL,
+                    width_request: 100, height_request: 56,
+                    hexpand: false, vexpand: false,
+                    valign: Gtk.Align.CENTER,
+                    overflow: Gtk.Overflow.HIDDEN,
+                    css_classes: ['thumbnail-frame'],
+                });
+                const thumbnailImage = new Gtk.Picture({
+                    content_fit: Gtk.ContentFit.COVER,
+                    can_shrink: true,
+                    halign: Gtk.Align.FILL, valign: Gtk.Align.FILL,
+                });
+                thumbnailImage.set_paintable(null);
+                thumbnailBox.append(thumbnailImage);
+                this._loadVideoThumbnail(path, thumbnailImage, listBox);
+                rowBox.append(thumbnailBox);
+
+                const infoBox = new Gtk.Box({
+                    orientation: Gtk.Orientation.VERTICAL,
+                    hexpand: true, halign: Gtk.Align.FILL, valign: Gtk.Align.CENTER,
+                });
+                const titleLabel = new Gtk.Label({
+                    label: path.split('/').pop() || path,
+                    halign: Gtk.Align.START, xalign: 0,
+                    ellipsize: Pango.EllipsizeMode.END, max_width_chars: 25,
+                });
+                titleLabel.add_css_class('title-4');
+                const pathLabel = new Gtk.Label({
+                    label: path,
+                    halign: Gtk.Align.START, xalign: 0,
+                    css_classes: ['dim-label'],
+                    wrap: true, wrap_mode: Pango.WrapMode.WORD_CHAR, max_width_chars: 35,
+                });
+                pathLabel.add_css_class('caption');
+
+                let metadataText = null;
+                try {
+                    if (meta && meta[path]) {
+                        const mrow = meta[path];
+                        let width = extractValue(mrow.width);
+                        let height = extractValue(mrow.height);
+                        let fps = extractValue(mrow.fps);
+                        let duration = extractValue(mrow.duration);
+                        let playCount = extractValue(mrow.playCount);
+
+                        const line1Parts = [];
+                        const line2Parts = [];
+                        const fileExtension = path.split('.').pop()?.toUpperCase() || '';
+
+                        if (width && height) {
+                            const typePrefix = fileExtension ? `${fileExtension} - ` : '';
+                            line1Parts.push(`${typePrefix}Resolution - ${width}x${height}`);
+                        }
+                        if (fps) line1Parts.push(`FPS - ${fps}`);
+                        if (duration !== null && duration !== undefined && duration > 0) {
+                            const minutes = Math.floor(duration / 60);
+                            const seconds = duration % 60;
+                            line2Parts.push(`Duration - ${minutes}:${seconds.toString().padStart(2, '0')}`);
+                        }
+                        if (playCount !== null && playCount !== undefined)
+                            line2Parts.push(`Plays - ${playCount}`);
+
+                        let fileNotFound = false;
+                        try {
+                            if (!Gio.File.new_for_path(path).query_exists(null)) fileNotFound = true;
+                        } catch (e) {}
+
+                        metadataText = {
+                            line1: line1Parts.join(' • '),
+                            line2: line2Parts.join(' • '),
+                            fileNotFound: fileNotFound,
+                        };
+                    }
+                } catch (e) {}
+
+                infoBox.append(titleLabel);
+                infoBox.append(pathLabel);
+
+                if (metadataText && typeof metadataText === 'object') {
+                    if (metadataText.line1) {
+                        const l1 = new Gtk.Label({
+                            label: metadataText.line1,
+                            halign: Gtk.Align.START, xalign: 0,
+                            css_classes: ['dim-label'],
+                            wrap: true, wrap_mode: Pango.WrapMode.WORD_CHAR, max_width_chars: 30,
+                        });
+                        l1.add_css_class('caption');
+                        infoBox.append(l1);
+                    }
+                    if (metadataText.line2) {
+                        const l2text = metadataText.line2 + (metadataText.fileNotFound ? '  ⚠️ File not found' : '');
+                        const l2 = new Gtk.Label({
+                            label: l2text,
+                            halign: Gtk.Align.START, xalign: 0,
+                            css_classes: ['dim-label'],
+                            wrap: true, wrap_mode: Pango.WrapMode.WORD_CHAR, max_width_chars: 30,
+                        });
+                        l2.add_css_class('caption');
+                        infoBox.append(l2);
+                    }
+                } else {
+                    const dl = new Gtk.Label({
+                        label: 'Detecting metadata...', halign: Gtk.Align.START, xalign: 0, css_classes: ['dim-label'],
+                    });
+                    dl.add_css_class('caption');
+                    infoBox.append(dl);
+                }
+
+                const buttonBox = new Gtk.Box({
+                    orientation: Gtk.Orientation.HORIZONTAL,
+                    spacing: 4, halign: Gtk.Align.END, valign: Gtk.Align.CENTER,
+                });
+                const upButton = new Gtk.Button({ icon_name: 'go-up-symbolic', tooltip_text: 'Move up', sensitive: index > 0 });
+                upButton.connect('clicked', () => {
+                    const p = getPaths();
+                    if (index > 0) {
+                        [p[index - 1], p[index]] = [p[index], p[index - 1]];
+                        setPaths(p);
+                        updateList();
+                    }
+                });
+                const downButton = new Gtk.Button({ icon_name: 'go-down-symbolic', tooltip_text: 'Move down', sensitive: index < pathsSnap.length - 1 });
+                downButton.connect('clicked', () => {
+                    const p = getPaths();
+                    if (index < p.length - 1) {
+                        [p[index], p[index + 1]] = [p[index + 1], p[index]];
+                        setPaths(p);
+                        updateList();
+                    }
+                });
+                const removeButton = new Gtk.Button({ icon_name: 'edit-delete-symbolic', tooltip_text: 'Remove', css_classes: ['destructive-action'] });
+                removeButton.connect('clicked', () => {
+                    const p = getPaths();
+                    p.splice(index, 1);
+                    setPaths(p);
+                    updateList();
+                });
+
+                buttonBox.append(upButton);
+                buttonBox.append(downButton);
+                buttonBox.append(removeButton);
+
+                rowBox.set_hexpand(false);
+                rowBox.set_halign(Gtk.Align.FILL);
+                rowBox.append(infoBox);
+                rowBox.append(buttonBox);
+                row.set_child(rowBox);
+                row._videoPath = path;
+                listBox.append(row);
+            };
 
             if (currentPaths.length === 0) {
                 const emptyRow = new Gtk.ListBoxRow();
@@ -3038,180 +3310,64 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                 }));
                 listBox.append(emptyRow);
                 scrolledWindow.height_request = 60;
-            } else {
-                currentPaths.forEach((path, index) => {
-                    const row = new Gtk.ListBoxRow();
-                    const rowBox = new Gtk.Box({
-                        orientation: Gtk.Orientation.HORIZONTAL,
-                        spacing: 8,
-                        margin_start: 8, margin_end: 8,
-                        margin_top: 4, margin_bottom: 4,
-                    });
-
-                    // Thumbnail
-                    const thumbnailBox = new Gtk.Box({
-                        orientation: Gtk.Orientation.VERTICAL,
-                        width_request: 100, height_request: 56,
-                        hexpand: false, vexpand: false,
-                        valign: Gtk.Align.CENTER,
-                        overflow: Gtk.Overflow.HIDDEN,
-                        css_classes: ['thumbnail-frame'],
-                    });
-                    const thumbnailImage = new Gtk.Picture({
-                        content_fit: Gtk.ContentFit.COVER,
-                        can_shrink: true,
-                        halign: Gtk.Align.FILL, valign: Gtk.Align.FILL,
-                    });
-                    thumbnailImage.set_paintable(null);
-                    thumbnailBox.append(thumbnailImage);
-                    rowBox.append(thumbnailBox);
-                    this._loadVideoThumbnail(path, thumbnailImage);
-
-                    // Info box
-                    const infoBox = new Gtk.Box({
-                        orientation: Gtk.Orientation.VERTICAL,
-                        hexpand: true, halign: Gtk.Align.FILL, valign: Gtk.Align.CENTER,
-                    });
-                    const titleLabel = new Gtk.Label({
-                        label: path.split('/').pop() || path,
-                        halign: Gtk.Align.START, xalign: 0,
-                        ellipsize: Pango.EllipsizeMode.END, max_width_chars: 25,
-                    });
-                    titleLabel.add_css_class('title-4');
-                    const pathLabel = new Gtk.Label({
-                        label: path,
-                        halign: Gtk.Align.START, xalign: 0,
-                        css_classes: ['dim-label'],
-                        wrap: true, wrap_mode: Pango.WrapMode.WORD_CHAR, max_width_chars: 35,
-                    });
-                    pathLabel.add_css_class('caption');
-
-                    // Read metadata
-                    let metadataText = null;
-                    try {
-                        const metadataValue = window._settings.get_value(metadataKey);
-                        let metadata = null;
-                        try { metadata = metadataValue.recursiveUnpack(); } catch (e) {}
-
-                        if (metadata && metadata[path]) {
-                            const meta = metadata[path];
-                            let width = extractValue(meta.width);
-                            let height = extractValue(meta.height);
-                            let fps = extractValue(meta.fps);
-                            let duration = extractValue(meta.duration);
-                            let playCount = extractValue(meta.playCount);
-
-                            const line1Parts = [];
-                            const line2Parts = [];
-                            const fileExtension = path.split('.').pop()?.toUpperCase() || '';
-
-                            if (width && height) {
-                                const typePrefix = fileExtension ? `${fileExtension} - ` : '';
-                                line1Parts.push(`${typePrefix}Resolution - ${width}x${height}`);
-                            }
-                            if (fps) line1Parts.push(`FPS - ${fps}`);
-                            if (duration !== null && duration !== undefined && duration > 0) {
-                                const minutes = Math.floor(duration / 60);
-                                const seconds = duration % 60;
-                                line2Parts.push(`Duration - ${minutes}:${seconds.toString().padStart(2, '0')}`);
-                            }
-                            if (playCount !== null && playCount !== undefined) {
-                                line2Parts.push(`Plays - ${playCount}`);
-                            }
-
-                            let fileNotFound = false;
-                            try {
-                                if (!Gio.File.new_for_path(path).query_exists(null)) fileNotFound = true;
-                            } catch (e) {}
-
-                            metadataText = {
-                                line1: line1Parts.join(' • '),
-                                line2: line2Parts.join(' • '),
-                                fileNotFound: fileNotFound,
-                            };
-                        }
-                    } catch (e) {}
-
-                    infoBox.append(titleLabel);
-                    infoBox.append(pathLabel);
-
-                    if (metadataText && typeof metadataText === 'object') {
-                        if (metadataText.line1) {
-                            const l1 = new Gtk.Label({
-                                label: metadataText.line1,
-                                halign: Gtk.Align.START, xalign: 0,
-                                css_classes: ['dim-label'],
-                                wrap: true, wrap_mode: Pango.WrapMode.WORD_CHAR, max_width_chars: 30,
-                            });
-                            l1.add_css_class('caption');
-                            infoBox.append(l1);
-                        }
-                        if (metadataText.line2) {
-                            const l2text = metadataText.line2 + (metadataText.fileNotFound ? '  ⚠️ File not found' : '');
-                            const l2 = new Gtk.Label({
-                                label: l2text,
-                                halign: Gtk.Align.START, xalign: 0,
-                                css_classes: ['dim-label'],
-                                wrap: true, wrap_mode: Pango.WrapMode.WORD_CHAR, max_width_chars: 30,
-                            });
-                            l2.add_css_class('caption');
-                            infoBox.append(l2);
-                        }
-                    } else {
-                        const dl = new Gtk.Label({
-                            label: 'Detecting metadata...', halign: Gtk.Align.START, xalign: 0, css_classes: ['dim-label'],
-                        });
-                        dl.add_css_class('caption');
-                        infoBox.append(dl);
-                    }
-
-                    // Buttons
-                    const buttonBox = new Gtk.Box({
-                        orientation: Gtk.Orientation.HORIZONTAL,
-                        spacing: 4, halign: Gtk.Align.END, valign: Gtk.Align.CENTER,
-                    });
-                    const upButton = new Gtk.Button({ icon_name: 'go-up-symbolic', tooltip_text: 'Move up', sensitive: index > 0 });
-                    upButton.connect('clicked', () => {
-                        const p = getPaths();
-                        if (index > 0) {
-                            [p[index - 1], p[index]] = [p[index], p[index - 1]];
-                            setPaths(p);
-                            updateList();
-                        }
-                    });
-                    const downButton = new Gtk.Button({ icon_name: 'go-down-symbolic', tooltip_text: 'Move down', sensitive: index < currentPaths.length - 1 });
-                    downButton.connect('clicked', () => {
-                        const p = getPaths();
-                        if (index < p.length - 1) {
-                            [p[index], p[index + 1]] = [p[index + 1], p[index]];
-                            setPaths(p);
-                            updateList();
-                        }
-                    });
-                    const removeButton = new Gtk.Button({ icon_name: 'edit-delete-symbolic', tooltip_text: 'Remove', css_classes: ['destructive-action'] });
-                    removeButton.connect('clicked', () => {
-                        const p = getPaths();
-                        p.splice(index, 1);
-                        setPaths(p);
-                        updateList();
-                    });
-
-                    buttonBox.append(upButton);
-                    buttonBox.append(downButton);
-                    buttonBox.append(removeButton);
-
-                    rowBox.set_hexpand(false);
-                    rowBox.set_halign(Gtk.Align.FILL);
-                    rowBox.append(infoBox);
-                    rowBox.append(buttonBox);
-                    row.set_child(rowBox);
-                    row._videoPath = path;
-                    listBox.append(row);
-                });
-                scrolledWindow.height_request = currentPaths.length * 120;
+                expanderRow.set_subtitle('0 videos selected');
+                console.log(`${LOGP} cleared list (${(GLib.get_monotonic_time() - tAll) / 1000}ms)`);
+                return;
             }
 
-            expanderRow.set_subtitle(`${currentPaths.length} video${currentPaths.length !== 1 ? 's' : ''} selected`);
+            const CHUNK_THRESHOLD = 24;
+            const CHUNK_SIZE = 8;
+
+            if (currentPaths.length <= CHUNK_THRESHOLD) {
+                currentPaths.forEach((path, index) => {
+                    appendRow(path, index, currentPaths, metadataCache);
+                });
+                scrolledWindow.height_request = currentPaths.length * 120;
+                expanderRow.set_subtitle(`${currentPaths.length} video${currentPaths.length !== 1 ? 's' : ''} selected`);
+                console.log(`${LOGP} built ${currentPaths.length} rows sync in ${(GLib.get_monotonic_time() - tAll) / 1000}ms`);
+                return;
+            }
+
+            const loadingRow = new Gtk.ListBoxRow();
+            loadingRow.set_child(new Gtk.Label({
+                label: `Loading ${currentPaths.length} videos…`,
+                css_classes: ['dim-label'],
+                margin_start: 12, margin_end: 12, margin_top: 12, margin_bottom: 12,
+            }));
+            listBox.append(loadingRow);
+            scrolledWindow.height_request = 100;
+            expanderRow.set_subtitle(`Loading ${currentPaths.length} videos…`);
+            console.log(`${LOGP} chunked build start n=${currentPaths.length}`);
+
+            let rowIdx = 0;
+            const pathsFrozen = currentPaths.slice();
+
+            const pump = () => {
+                if (buildGen !== listBox._lpsBuildGen)
+                    return GLib.SOURCE_REMOVE;
+
+                if (rowIdx === 0) {
+                    try {
+                        listBox.remove(loadingRow);
+                    } catch (e) { }
+                }
+
+                const end = Math.min(rowIdx + CHUNK_SIZE, pathsFrozen.length);
+                for (; rowIdx < end; rowIdx++)
+                    appendRow(pathsFrozen[rowIdx], rowIdx, pathsFrozen, metadataCache);
+
+                scrolledWindow.height_request = Math.min(pathsFrozen.length * 120, 4800);
+
+                if (rowIdx >= pathsFrozen.length) {
+                    listBox._lpsChunkIdle = 0;
+                    expanderRow.set_subtitle(`${pathsFrozen.length} video${pathsFrozen.length !== 1 ? 's' : ''} selected`);
+                    console.log(`${LOGP} chunked build done ${pathsFrozen.length} rows in ${(GLib.get_monotonic_time() - tAll) / 1000}ms`);
+                    return GLib.SOURCE_REMOVE;
+                }
+                return GLib.SOURCE_CONTINUE;
+            };
+
+            listBox._lpsChunkIdle = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, pump);
         };
 
         updateList();
@@ -3301,7 +3457,7 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                     if (added) {
                         setPaths(paths);
                         this._updateVideoMetadata(paths, window, metadataKey, updateCallback);
-                        if (updateCallback) updateCallback();
+                        // updateList already ran via changed:: after setPaths.
                     }
                 }
             } catch (e) {
@@ -3337,7 +3493,9 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
 
     // Scan a folder and replace the current list with supported video files.
     _scanGenericFolderForVideos(folderPath, getPaths, setPaths, window, metadataKey, updateCallback) {
+        const LOGF = '[LLPrefs][Folder]';
         try {
+            const t0 = GLib.get_monotonic_time();
             const folder = Gio.File.new_for_path(folderPath);
             const enumerator = folder.enumerate_children('standard::name,standard::type', Gio.FileQueryInfoFlags.NONE, null);
             const videoExtensions = ['.mp4', '.avi', '.mkv', '.mov', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv'];
@@ -3351,20 +3509,26 @@ export default class LiveLockscreenExtensionPrefs extends ExtensionPreferences {
                     }
                 }
             }
+            const tEnum = (GLib.get_monotonic_time() - t0) / 1000;
             if (videoFiles.length > 0) {
                 const replacementPaths = [...new Set(videoFiles.filter(Boolean))];
                 const currentPaths = getPaths();
                 const changed = currentPaths.length !== replacementPaths.length
                     || currentPaths.some((p, i) => p !== replacementPaths[i]);
 
+                const tBeforeSet = GLib.get_monotonic_time();
                 if (changed)
                     setPaths(replacementPaths);
+                const tSet = (GLib.get_monotonic_time() - tBeforeSet) / 1000;
+
+                console.log(`${LOGF} ${replacementPaths.length} videos, enumerate ${tEnum}ms, setPaths ${tSet}ms, key=${metadataKey}`);
 
                 this._updateVideoMetadata(replacementPaths, window, metadataKey, updateCallback);
-                if (updateCallback) updateCallback();
+            } else {
+                console.log(`${LOGF} no video files in ${folderPath} (enumerate ${tEnum}ms)`);
             }
         } catch (e) {
-            console.log(`Error scanning folder: ${e}`);
+            console.log(`${LOGF} error: ${e}`);
         }
     }
 
