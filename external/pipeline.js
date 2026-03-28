@@ -4,6 +4,36 @@ import GstController from 'gi://GstController';
 
 const FADE_DURATION = 300;
 
+/** Raise VA/NVDEC decoder ranks before any playbin is built (safe to call once per process). */
+export function boostHwDecoderRanks() {
+    const hwDecoders = [
+        'vah264dec', 'vah265dec', 'vavp9dec', 'vaav1dec',
+        'vajpegdec', 'vampeg2dec',
+        'vaapidecodebin', 'vaapih264dec', 'vaapih265dec', 'vaapivp9dec',
+        'nvh264dec', 'nvh265dec', 'nvvp9dec', 'nvav1dec',
+        'nvh264sldec', 'nvh265sldec',
+    ];
+    const boosted = [];
+    const targetRank = Gst.Rank.PRIMARY + 256;
+    for (const name of hwDecoders) {
+        const factory = Gst.ElementFactory.find(name);
+        if (factory) {
+            const oldRank = factory.get_rank();
+            if (oldRank < targetRank) {
+                factory.set_rank(targetRank);
+                boosted.push(`${name} (${oldRank}→${targetRank})`);
+            } else {
+                boosted.push(`${name} (already ${oldRank})`);
+            }
+        }
+    }
+    if (boosted.length > 0) {
+        console.log(`[ExtPipeline] HW decoder ranks boosted: ${boosted.join(', ')}`);
+    } else {
+        console.log('[ExtPipeline] No hardware decoders found on this system');
+    }
+}
+
 // Single gtk4paintablesink-based pipeline with playlist support.
 export default class Pipeline {
     constructor({ videos, volume, loop, randomOrder, useVideorate, framerate, targetWidth = 0, targetHeight = 0, initialIndex = null, onTrackSwitch = null }) {

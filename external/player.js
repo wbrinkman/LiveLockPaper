@@ -1,9 +1,10 @@
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk?version=4.0';
 import Gdk from 'gi://Gdk?version=4.0';
+import Gst from 'gi://Gst';
 import cairo from 'cairo';
 
-import Pipeline from './pipeline.js';
+import Pipeline, { boostHwDecoderRanks } from './pipeline.js';
 import { ScalingMode } from '../enums.js';
 import CommandHandler from './command_handler.js';
 
@@ -94,6 +95,14 @@ export default class Player {
         const monitors = config.monitors || [];
         const renderScale = Math.max(0.25, Math.min(1.0, Number(config.renderScale) || 1.0));
         const shouldScale = renderScale < 0.999;
+
+        if (config.preferHwDecoder) {
+            if (!Gst.is_initialized()) {
+                if (!Gst.init_check([])[0])
+                    throw new Error('Unable to initialize GStreamer');
+            }
+            boostHwDecoderRanks();
+        }
 
         // Determine if per-monitor (each monitor has its own pipeline) or shared
         const perMonitor = monitors.length > 1;

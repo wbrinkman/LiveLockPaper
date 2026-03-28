@@ -137,9 +137,9 @@
             <description>Sometimes the very first frame of the video might be completely green, so there is an option to skip it</description>
         </key>
         <key name="debug-prefer-hardware-decoder" type="b">
-            <default>false</default>
+            <default>true</default>
             <summary>Prefer hardware video decoder</summary>
-            <description>When enabled, prioritises VA-API and NVDEC hardware decoders over software decoders. Reduces CPU usage significantly but may not work on all systems.</description>
+            <description>When enabled, prioritises VA-API and NVDEC hardware decoders over software decoders. Reduces CPU usage when drivers are available; disable if playback fails on your system.</description>
         </key>
         <key name="debug-gpu-color-conversion" type="b">
             <default>false</default>

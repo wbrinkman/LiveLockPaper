@@ -3,11 +3,13 @@ import GLib from 'gi://GLib';
 import GstController from 'gi://GstController';
 
 export default class Pipeline {
-    constructor({ videoPath, volume, loop, framerate, skipFrame, dataCallback, onVideoEnd, targetWidth, targetHeight, timerPriority, preferHwDecoder, gpuColorConversion, name, timerDelay, adaptivePolling }) {
+    constructor({ videoPath, volume, loop, framerate, skipFrame, dataCallback, onVideoEnd, targetWidth, targetHeight, timerPriority, preferHwDecoder, gpuColorConversion, name, timerDelay, adaptivePolling, useVideorate }) {
         this._videoPath = videoPath
         this._volume = volume
         this._loop = loop
         this._framerate = framerate
+        // When true, videorate + caps force output to this._framerate (manual FPS mode). When false, stream keeps native timing (auto FPS).
+        this._useVideorate = useVideorate ?? false
         this._dataCallback = dataCallback
         this._skipFrame = skipFrame ?? false
         this._onVideoEnd = onVideoEnd || null
@@ -139,6 +141,24 @@ export default class Pipeline {
             // Assemble the video bin chain.
             const binElements = [];
             if (preConvertQueue) binElements.push(preConvertQueue);
+
+            if (this._useVideorate) {
+                const videoRate = Gst.ElementFactory.make('videorate', 'videorate');
+                if (!videoRate)
+                    throw new Error('Failed to create videorate element');
+                try {
+                    videoRate.set_property('skip-to-first', true);
+                } catch (e) { /* older GStreamer */ }
+                const fpsRound = Math.max(1, Math.min(120, Math.round(this._framerate)));
+                const framerateCaps = Gst.Caps.from_string(`video/x-raw,framerate=${fpsRound}/1`);
+                const capsFilter = Gst.ElementFactory.make('capsfilter', 'framerate-caps');
+                if (!capsFilter)
+                    throw new Error('Failed to create capsfilter for framerate');
+                capsFilter.set_property('caps', framerateCaps);
+                binElements.push(videoRate);
+                binElements.push(capsFilter);
+            }
+
             if (useGpuConversion) {
                 binElements.push(glUpload);
                 binElements.push(glConvert);
@@ -265,7 +285,8 @@ export default class Pipeline {
             const gpuLabel = useGpuConversion ? '✓' : '✗';
             const staggerInfo = this._timerDelay > 0 ? `, stagger: ${this._timerDelay}ms` : '';
             const deliveryLabel = this._adaptivePolling ? 'adaptive' : 'fixed';
-            console.log(`[Pipeline:${this._name}] Initialized: ${this._framerate} fps (${interval.toFixed(1)}ms${scaleInfo}${staggerInfo}), polling: ${deliveryLabel}, priority: ${prioLabel}, hwdec: ${hwLabel}, gpu-cc: ${gpuLabel}`);
+            const rateLabel = this._useVideorate ? 'videorate+caps' : 'native';
+            console.log(`[Pipeline:${this._name}] Initialized: ${this._framerate} fps (${interval.toFixed(1)}ms${scaleInfo}${staggerInfo}), ${rateLabel}, polling: ${deliveryLabel}, priority: ${prioLabel}, hwdec: ${hwLabel}, gpu-cc: ${gpuLabel}`);
             this._lastStatsTime = GLib.get_monotonic_time();
 
             // Stagger timer start when requested.

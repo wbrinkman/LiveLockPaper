@@ -1821,6 +1821,7 @@ export default class LockscreenExtension extends Extension {
             volume: this._volume,
                 loop: loop && this._videoPaths.length === 1,
             framerate: initialFramerate,
+            useVideorate: !autoFps,
             skipFrame: skipFrame,
                 targetWidth: maxW,
                 targetHeight: maxH,
@@ -2019,8 +2020,10 @@ export default class LockscreenExtension extends Extension {
         // Settings for subprocess
         const volume = this._settings.get_int(Keys.AUDIO_VOLUME) / 100;
         const scalingMode = this._settings.get_int(Keys.SCALING_MODE);
-        const useVideorate = this._settings.get_int(Keys.FRAMERATE) > 0; // only if framerate set
+        const lockAutoFps = this._settings.get_boolean(Keys.VIDEO_AUTO_FPS);
+        const useVideorate = !lockAutoFps;
         const framerate = this._settings.get_int(Keys.FRAMERATE);
+        const preferHwDecoder = this._settings.get_boolean(Keys.DEBUG_PREFER_HW_DECODER);
         this._fadeInDuration = this._settings.get_int(Keys.FADE_IN_DURATION);
         this._scalingMode = scalingMode;
         this._blurRadius = this._settings.get_int(Keys.BLUR_RADIUS);
@@ -2049,8 +2052,9 @@ export default class LockscreenExtension extends Extension {
         const config = {
             scalingMode,
             volume,
-            useVideorate: false, // Let playbin handle framerate
+            useVideorate,
             framerate,
+            preferHwDecoder,
             randomOrder,
             monitors: subprocessMonitors,
         };
@@ -2601,6 +2605,7 @@ export default class LockscreenExtension extends Extension {
                 volume: this._volume,
                 loop: shouldLoop,
                 framerate: framerate,
+                useVideorate: !this._lockPipelineParams.autoFps,
                 skipFrame: skipFrame,
                 targetWidth: monitor.width,
                 targetHeight: monitor.height,
@@ -3186,6 +3191,7 @@ export default class LockscreenExtension extends Extension {
                     volume: volume,
                     loop: shouldLoop,
                     framerate: framerate,
+                    useVideorate: !autoFps,
                     skipFrame: skipFrame,
                     targetWidth: tgtW,
                     targetHeight: tgtH,
@@ -3281,6 +3287,7 @@ export default class LockscreenExtension extends Extension {
                 volume: volume,
                 loop: loop && wpVideoPaths.length === 1,
                 framerate: this._getWallpaperFramerate(videoPath),
+                useVideorate: !autoFps,
                 skipFrame: skipFrame,
                 targetWidth: maxW,
                 targetHeight: maxH,
@@ -3354,7 +3361,10 @@ export default class LockscreenExtension extends Extension {
         const perMonitor = this._settings.get_boolean(Keys.WALLPAPER_PER_MONITOR);
         const scalingMode = this._settings.get_int(Keys.WALLPAPER_SCALING_MODE);
         const volume = this._settings.get_int(Keys.WALLPAPER_VOLUME) / 100;
+        const wallpaperAutoFps = this._settings.get_boolean(Keys.WALLPAPER_AUTO_FPS);
+        const useVideorate = !wallpaperAutoFps;
         const framerate = this._settings.get_int(Keys.WALLPAPER_FRAMERATE);
+        const preferHwDecoder = this._settings.get_boolean(Keys.DEBUG_PREFER_HW_DECODER);
         const qualityPct = this._settings.get_int(Keys.WALLPAPER_QUALITY);
         const renderScale = Math.max(0.25, Math.min(1.0, qualityPct / 100));
         const fadeInDuration = this._settings.get_int(Keys.WALLPAPER_FADE_IN_DURATION);
@@ -3450,8 +3460,9 @@ export default class LockscreenExtension extends Extension {
         const playerConfig = {
             scalingMode,
             volume,
-            useVideorate: false,
+            useVideorate,
             framerate,
+            preferHwDecoder,
             renderScale,
             randomOrder,
             monitors: subprocessMonitors,
