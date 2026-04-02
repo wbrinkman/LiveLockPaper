@@ -275,7 +275,12 @@ export default class Pipeline {
 
             this._initBusWatch();
 
-            const interval = 1000 / this._framerate;
+            // Manual FPS: poll at the capped rate. Auto/native timing: poll fast; videorate is off and
+            // appsink sync drives frame times — using manual FPS here wrongly throttles to 2fps etc.
+            const pollHz = this._useVideorate
+                ? Math.max(1, Math.min(120, Math.round(this._framerate)))
+                : 60;
+            const interval = 1000 / pollHz;
             this._interval = interval;
             const scaleInfo = (this._targetWidth > 0 && this._targetHeight > 0)
                 ? `, target: ${this._targetWidth}x${this._targetHeight}`
@@ -286,7 +291,8 @@ export default class Pipeline {
             const staggerInfo = this._timerDelay > 0 ? `, stagger: ${this._timerDelay}ms` : '';
             const deliveryLabel = this._adaptivePolling ? 'adaptive' : 'fixed';
             const rateLabel = this._useVideorate ? 'videorate+caps' : 'native';
-            console.log(`[Pipeline:${this._name}] Initialized: ${this._framerate} fps (${interval.toFixed(1)}ms${scaleInfo}${staggerInfo}), ${rateLabel}, polling: ${deliveryLabel}, priority: ${prioLabel}, hwdec: ${hwLabel}, gpu-cc: ${gpuLabel}`);
+            const pollNote = this._useVideorate ? `${this._framerate}fps` : `native+${pollHz}Hz-poll`;
+            console.log(`[Pipeline:${this._name}] Initialized: ${pollNote} (${interval.toFixed(1)}ms${scaleInfo}${staggerInfo}), ${rateLabel}, polling: ${deliveryLabel}, priority: ${prioLabel}, hwdec: ${hwLabel}, gpu-cc: ${gpuLabel}`);
             this._lastStatsTime = GLib.get_monotonic_time();
 
             // Stagger timer start when requested.
@@ -474,7 +480,8 @@ export default class Pipeline {
         if (elapsed >= 5.0) {
             const actualFps = this._frameCount / elapsed;
             const mode = this._adaptivePolling ? 'adaptive' : 'fixed';
-            console.log(`[Pipeline:${this._name}] Stats: ${actualFps.toFixed(1)} fps (target: ${this._framerate}), ${this._droppedFrames} empty in ${elapsed.toFixed(0)}s [${mode}]`);
+            const targetLabel = this._useVideorate ? `${this._framerate}fps` : 'native';
+            console.log(`[Pipeline:${this._name}] Stats: ${actualFps.toFixed(1)} fps (${targetLabel}), ${this._droppedFrames} empty in ${elapsed.toFixed(0)}s [${mode}]`);
             this._frameCount = 0;
             this._droppedFrames = 0;
             this._lastStatsTime = now;
