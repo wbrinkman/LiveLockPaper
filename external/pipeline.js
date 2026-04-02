@@ -105,6 +105,8 @@ export default class Pipeline {
             return { bin, sink };
         };
 
+        // Keep this chain minimal: playbin negotiates to gtk4paintablesink. Extra elements
+        // (videocrop, forced deinterlace, videoconvert) break caps/DMA paths and can show black.
         const hasTargetSize = this._targetWidth > 0 && this._targetHeight > 0;
         if (this._useVideorate) {
             const prefix =
