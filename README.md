@@ -47,10 +47,6 @@
 - **Large libraries** — Chunked list builds, metadata detection, queued **ffmpeg** thumbnails (better for 4K/HEVC), thumbnails reattach after refresh. Prefs logs use **`[LLPrefs]`** when running **`gnome-extensions prefs live-lockpaper@DeLuca21`** from a terminal.
 - **Destructive confirmations** — **Remove from library** and **Remove from folder/playlist** require confirmation (**Adw.AlertDialog**, same pattern as clearing thumbnails/metadata).
 
-### ℹ️ Colour (GTK4)
-
-- **GTK4** (`gtk4paintablesink`) video can look **softer or less contrasty** than **mpv** or many desktop players; **mpv** or **appsink** may match other apps more closely.
-
 _Release notes for **v3.0.0** are in [Recent Updates](#recent-updates)._
 
 ---
@@ -188,7 +184,7 @@ sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0
 
 ## 🧪 Renderer Notes (GTK4, Appsink, mpv)
 
-- **GTK4** (`gtk4paintablesink` in a subprocess) is the **default**. It is often efficient for **1080p**-class workloads; colour/contrast can look slightly different from standalone players (see **What's New in v4**).
+- **GTK4** (`gtk4paintablesink` in a subprocess) is the **default**. It is often efficient for **1080p**-class workloads.
 - **Legacy appsink** runs **in-process** GStreamer into Clutter; use for comparison or if GTK4/mpv misbehave. **GPU colour conversion** and **adaptive frame polling** apply **only** when this renderer is selected (controls are insensitive for GTK4 and mpv).
 - **mpv** uses **`mpv`** on `PATH` (one helper process, one window per monitor). Strong option for **4K** on many GPUs; install the distro **mpv** package. If **mpv** is missing, the extension falls back to another backend.
 - **Prefer hardware decoder** boosts **GStreamer** decoder ranks for GTK4 and appsink; for **mpv** it toggles **`--hwdec`** (see Diagnostics copy).
@@ -232,7 +228,6 @@ This helps save CPU/GPU resources when the wallpaper isn't visible.
 - Possible clicking/crackling sounds when pausing/playing video with audio.
 - Performance issues and shell crashes with high-res videos (hardware dependent).
 - **Video wallpaper** uses GPU/CPU continuously — higher framerates and per-monitor mode use more resources. **4K at very high fps** (e.g. 120–240) may exceed hardware decode limits or stress the compositor; prefer **auto off + lower manual FPS**, **lower render quality**, **mpv** renderer, or **re-encoded** clips for wallpaper.
-- **GTK4 vs mpv colour:** GTK4 video can look **less contrasty** than **mpv** or other players; use **mpv** (or **appsink**) if you want a closer match to desktop players.
 - Most settings apply immediately; a few session-level changes may still need an extension reload.
 - Window positioning may need adjustment when settings window is on a different monitor (work in progress).
 
