@@ -28,40 +28,44 @@
 
 ---
 
-## What's New in v3.0.0?
+## What's New in v4.0.0?
 
-### ✨ Highlights
+### ✨ Major additions
 
-- **Preferences reorganization** - Lock Screen, Wallpaper, and Debug pages now use collapsed expanders to keep pages compact and easier to scan.
-- **Keep Awake feature** - Added configurable keep-awake behavior for lockscreen playback workflows.
-- **Lockscreen text customization** - Added richer controls for command output, time/date formatting, and text styling.
-- **Video list and layout polish** - Improved button layout and icon consistency in file/folder selection flows.
-- **Expander row behavior** - Correct nested arrow-state visuals by relying on default `Adw.ExpanderRow` behavior.
-- **Wallpaper settings robustness** - Correct initialization order in wallpaper preferences to avoid transient sensitivity issues.
-- **Clock and command output updates** - More consistent second-precision at minute rollover and faster hour-boundary command refresh.
+- **Redesigned preferences** — The old **single-sheet** GNOME-extension-style settings are replaced by a **full preferences app**: **Home**, **Library**, and **Settings** (libadwaita, multi-page layout, clearer structure).
+- **Library** — New hub to **add files and folders**, manage **playlists**, browse **thumbnails and metadata**, and **apply** videos to the **lock screen** or **wallpaper** (including per-display assignment from the Library flow).
+- **mpv renderer** — Third playback backend: **`mpv`** on `PATH` (`external/mpv_run.js`), per-monitor windows for lock screen and wallpaper, same helper command protocol as the GTK subprocess. Strong option for **4K** and heavy clips; uses **`--video-sync=display-resample`** and a larger demuxer buffer. Choose it under **Settings → Diagnostics → Performance → Video renderer** or from the **panel quick menu**. New **`video-renderer`** key (GTK4 default, **appsink**, **mpv**); legacy **`debug-use-gtk4-sink`** migrates on first load.
 
-### 🐛 Fixes
+### 🐛 Fixes & reliability
 
-- **Play count reliability** - Reworked play-count tracking and reset behavior for lockscreen and wallpaper modes, including GTK4 helper mode paths.
-- **Framerate settings vs GTK4** — The wallpaper/lock **GTK4 helper** had **`useVideorate` forced off**, so **manual framerate** and **auto-detect FPS** did not match what the UI implied. That is fixed: with **auto-detect off**, both GTK4 and appsink use **GStreamer `videorate`** so manual FPS caps output; with **auto on**, playback follows each file’s native timing.
+- **Play counts** — Reworked tracking and reset for lock screen and wallpaper, including GTK4 helper paths.
+- **Framerate vs GTK4** — Manual FPS and auto-FPS match the UI: with **auto off**, GTK4 and appsink use **GStreamer `videorate`**; with **auto on**, native timing per file.
+- **Hardware decode** — **Prefer hardware decoder** raises VA-API/NVDEC ranks for the **GTK4 helper** and **appsink**, and drives **mpv `--hwdec`** when the mpv backend is active (defaults **on** for new installs).
 
-### 🔧 Playback, preferences, and performance (since v3.0.0)
+### 🔧 Library & settings polish
 
-- **Hardware decode** — **Prefer hardware decoder** (Debug) raises VA-API / NVDEC plugin ranks for the **GTK4 helper process** as well as in-process appsink. It defaults to **on** for new installs; turn it off if playback glitches on your stack.
-- **Preferences** — Large playlists: chunked list build and metadata detection, queued **ffmpeg** thumbnails (friendlier to 4K/HEVC), thumbnails reattach after list refreshes. Logs prefixed with **`[LLPrefs]`** when you run **`gnome-extensions prefs <uuid>`** from a terminal.
+- **Large libraries** — Chunked list builds, metadata detection, queued **ffmpeg** thumbnails (better for 4K/HEVC), thumbnails reattach after refresh. Prefs logs use **`[LLPrefs]`** when running **`gnome-extensions prefs live-lockpaper@DeLuca21`** from a terminal.
+- **Destructive confirmations** — **Remove from library** and **Remove from folder/playlist** require confirmation (**Adw.AlertDialog**, same pattern as clearing thumbnails/metadata).
+
+### ℹ️ Colour (GTK4)
+
+- **GTK4** (`gtk4paintablesink`) video can look **softer or less contrasty** than **mpv** or many desktop players; **mpv** or **appsink** may match other apps more closely.
+
+_Release notes for **v3.0.0** are in [Recent Updates](#recent-updates)._
 
 ---
 
 ## 🚀 Features
 
-- **🎥 Video Lock Screen + Desktop Wallpaper** — Use videos on lock screen and desktop.
+- **🎥 Video Lock Screen + Desktop Wallpaper** — Use videos on lock screen and desktop (GTK4, appsink, or **mpv** backend).
 - **🖥️ Per-Monitor Playback** — Assign videos per display with playlist support.
 - **🎶 Multi-Video Playlists** — Add files/folders, then play sequentially or randomly.
+- **📚 Library (prefs)** — Browse the store with thumbnails and metadata; playlists; apply clips to lock screen or wallpaper from one place.
 - **📊 Auto FPS + manual cap** — Auto follows each file’s native framerate; with auto off, manual FPS caps playback via GStreamer (`videorate`) on both GTK4 and appsink.
 - **🎨 Flexible Scaling** — Cover, fit, or stretch to match your layout.
 - **🌫️ Blur + Prompt Effects** — Adjustable blur/brightness and password prompt behavior (including grayscale option).
 - **🔊 Optional Audio** — Volume control with fade-in/out support.
-- **📑 Full Preferences UI** — Separate Lock Screen, Wallpaper, and Debug tabs.
+- **📑 Full Preferences UI** — **Home**, **Library**, and **Settings** (lock screen, wallpaper, diagnostics, and cache tools).
 - **📌 Top Bar Quick Controls** — Play/pause, next video, restart, settings, and quick toggles from the panel menu.
 - **🖼️ Thumbnail + Metadata Tools** — Video previews, metadata display, and quick preview.
 - **✅ Startup Validation** — Missing videos are removed automatically on startup.
@@ -96,8 +100,9 @@ These defaults are aimed at sensible behavior out of the box:
 - **Wallpaper render quality:** `90%`
 - **Wallpaper disable on battery:** enabled (saves battery on laptops)
 - **Pause wallpaper when hidden:** Any monitor (pauses when any monitor is covered)
-- **Force legacy appsink renderer:** disabled (GTK4 renderer path remains default)
-- **Prefer hardware decoder:** enabled (VA-API / NVDEC rank boost for both GTK4 helper and appsink; disable if a video fails)
+- **Video renderer (Diagnostics):** GTK4 subprocess (mpv and legacy appsink available there; install **mpv** for the mpv backend)
+- **Force legacy appsink renderer (deprecated):** migrated into **video-renderer**; leave off unless upgrading old configs
+- **Prefer hardware decoder:** enabled (GStreamer VA-API/NVDEC for GTK4 and appsink; **mpv `--hwdec`** when using mpv; disable if a video fails)
 - **Verbose logging:** disabled (enable for troubleshooting)
 
 ---
@@ -166,28 +171,28 @@ The original (non-forked) version is available on the GNOME Extensions website:
 - **GNOME Shell 47–50**
 - **GStreamer** with good/bad/ugly plugins
 - **ffmpeg** (for thumbnail generation in preferences)
+- **mpv** (optional but recommended if you use the **mpv** renderer or want easier **4K** playback)
 
 ```bash
 # Arch / Manjaro
-sudo pacman -S gst-plugins-good gst-plugins-bad gst-plugins-ugly ffmpeg
+sudo pacman -S gst-plugins-good gst-plugins-bad gst-plugins-ugly ffmpeg mpv
 
 # Fedora
-sudo dnf install gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugins-ugly ffmpeg
+sudo dnf install gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugins-ugly ffmpeg mpv
 
 # Ubuntu / Debian
-sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly ffmpeg
+sudo apt install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly ffmpeg mpv
 ```
 
 ---
 
-## 🧪 Renderer Notes (GTK4 vs Appsink)
+## 🧪 Renderer Notes (GTK4, Appsink, mpv)
 
-- GTK4 (`gtk4paintablesink`) is the default renderer and is usually the most performant path.
-- The Debug menu includes an option to force the legacy appsink renderer for comparison and troubleshooting.
-- **Prefer hardware decoder** applies to **both** GTK4 and appsink (the GTK helper runs `boostHwDecoderRanks()` when the toggle is on).
-- **GPU colour conversion** and **adaptive frame polling** are **appsink-only**; their controls are disabled in the UI while GTK4 mode is active.
-- In multi-monitor wallpaper mode on Wayland, helper windows are kept internal and pinned for window-manager stability to keep the secondary-monitor dock visible after unlock.
-- Helper windows use improved skip_taskbar handling for better dock compatibility on Wayland.
+- **GTK4** (`gtk4paintablesink` in a subprocess) is the **default**. It is often efficient for **1080p**-class workloads; colour/contrast can look slightly different from standalone players (see **What's New in v4**).
+- **Legacy appsink** runs **in-process** GStreamer into Clutter; use for comparison or if GTK4/mpv misbehave. **GPU colour conversion** and **adaptive frame polling** apply **only** when this renderer is selected (controls are insensitive for GTK4 and mpv).
+- **mpv** uses **`mpv`** on `PATH` (one helper process, one window per monitor). Strong option for **4K** on many GPUs; install the distro **mpv** package. If **mpv** is missing, the extension falls back to another backend.
+- **Prefer hardware decoder** boosts **GStreamer** decoder ranks for GTK4 and appsink; for **mpv** it toggles **`--hwdec`** (see Diagnostics copy).
+
 
 ## 🎨 Panel Icon Customization
 
@@ -226,7 +231,8 @@ This helps save CPU/GPU resources when the wallpaper isn't visible.
 - Brief green frame at video start — enable **"Skip first frame"** in Debug settings to fix.
 - Possible clicking/crackling sounds when pausing/playing video with audio.
 - Performance issues and shell crashes with high-res videos (hardware dependent).
-- **Video wallpaper** uses GPU/CPU continuously — higher framerates and per-monitor mode use more resources. **4K at very high fps** (e.g. 120–240) may exceed hardware decode limits or stress the compositor; prefer **auto off + lower manual FPS**, **lower render quality**, or **re-encoded** clips for wallpaper.
+- **Video wallpaper** uses GPU/CPU continuously — higher framerates and per-monitor mode use more resources. **4K at very high fps** (e.g. 120–240) may exceed hardware decode limits or stress the compositor; prefer **auto off + lower manual FPS**, **lower render quality**, **mpv** renderer, or **re-encoded** clips for wallpaper.
+- **GTK4 vs mpv colour:** GTK4 video can look **less contrasty** than **mpv** or other players; use **mpv** (or **appsink**) if you want a closer match to desktop players.
 - Most settings apply immediately; a few session-level changes may still need an extension reload.
 - Window positioning may need adjustment when settings window is on a different monitor (work in progress).
 
@@ -234,23 +240,15 @@ This helps save CPU/GPU resources when the wallpaper isn't visible.
 
 ## Recent Updates
 
-### What's New in v2.0.0?
+### What's New in v3.0.0?
 
-#### 🐛 **Bug Fixes**
-
-- **Window positioning** - Improved window positioning and helper window handling across multiple monitors
-- **Sleep/wake blocking** - Fixed video processes blocking system sleep by properly destroying lockscreen videos on sleep and pausing wallpaper videos
-
-#### ✨ **Enhancements**
-
-- **Panel icon customization** - Dynamic icons that change based on wallpaper/lockscreen state (standard GNOME icons or custom icons), or static custom icons
-- **Enhanced panel menu** - Organized submenus for wallpaper and lockscreen settings
-- **Separate battery controls** - Independent battery disable options for lockscreen and wallpaper (enabled by default to save battery)
-- **Enhanced pause when hidden** - Three modes: Off, All monitors covered, or Any monitor covered
-- **Improved sleep/wake handling** - Enhanced video pause/resume during system sleep/wake cycles (lockscreen is destroyed/recreated, wallpaper is paused/resumed)
-- **Verbose logging** - Enhanced debug logging for troubleshooting (GTK helper windows, sleep/wake events, state changes)
-- **Folder scanning improvement** - When scanning a folder for videos, the extension now replaces the current video list instead of appending to it, preventing duplicate entries
-- **Grayscale prompt** - Option to enable grayscale effect on password prompt
+- **Preferences reorganization** — Lock Screen, Wallpaper, and Debug pages use collapsed expanders for a more compact layout.
+- **Keep Awake** — Configurable keep-awake behaviour for lock-screen playback workflows.
+- **Lock screen text** — Richer controls for command output, time/date formatting, and styling.
+- **Video list / layout** — Clearer buttons and icons in file and folder selection flows.
+- **Expander rows** — Correct nested arrow visuals using default `Adw.ExpanderRow` behaviour.
+- **Wallpaper prefs** — Initialization order fixes to avoid transient control sensitivity.
+- **Clock / command output** — More consistent behaviour at minute rollover and faster refresh at hour boundaries.
 
 ---
 
