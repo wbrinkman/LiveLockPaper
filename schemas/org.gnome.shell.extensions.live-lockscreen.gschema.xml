@@ -79,7 +79,7 @@
             <summary>Background audio volume</summary>
         </key>
         <key name="background-fade-in-duration" type="i">
-            <range min="0" max="600000" />
+            <range min="0" max="5000" />
             <default>500</default>
             <summary>Background fade-in animation duration</summary>
         </key>
@@ -139,7 +139,7 @@
         <key name="debug-prefer-hardware-decoder" type="b">
             <default>true</default>
             <summary>Prefer hardware video decoder</summary>
-            <description>When enabled, prioritises VA-API and NVDEC hardware decoders over software decoders. Reduces CPU usage when drivers are available; disable if playback fails on your system.</description>
+            <description>When enabled, GTK4 helper and in-process appsink paths boost VA-API and NVDEC GStreamer plugin ranks. The mpv subprocess path uses mpv --hwdec (auto-safe, or auto-copy-safe when wallpaper blur needs GPU readback). Reduces CPU when drivers work; disable if playback fails.</description>
         </key>
         <key name="debug-gpu-color-conversion" type="b">
             <default>false</default>
@@ -162,10 +162,16 @@
             <summary>Adaptive frame polling</summary>
             <description>Replaces the fixed-interval polling timer with an adaptive scheduler. When a frame is available it re-polls immediately; when the decoder has no frame ready it backs off to the normal interval. Reduces empty polls and can lower CPU usage.</description>
         </key>
+        <key name="video-renderer" type="i">
+            <range min="0" max="2" />
+            <default>0</default>
+            <summary>Video renderer backend</summary>
+            <description>0 = GTK4 subprocess (gtk4paintablesink, default), 1 = legacy in-process GStreamer appsink, 2 = mpv subprocess (requires mpv in PATH). If the chosen backend is unavailable, the extension falls back automatically.</description>
+        </key>
         <key name="debug-use-gtk4-sink" type="b">
             <default>false</default>
-            <summary>Force legacy appsink renderer</summary>
-            <description>When false (default), use the external GTK4 subprocess with gtk4paintablesink for better performance. When true, force the old in-process appsink renderer for compatibility testing. Falls back to appsink automatically if gtk4paintablesink is not available.</description>
+            <summary>Force legacy appsink renderer (deprecated)</summary>
+            <description>Deprecated: use video-renderer instead. When true, prefer legacy appsink; migrated to video-renderer on first load.</description>
         </key>
         <key name="debug-gtk-helper-logs" type="b">
             <default>false</default>
@@ -256,7 +262,7 @@
             <summary>Wallpaper audio volume</summary>
         </key>
         <key name="wallpaper-fade-in-duration" type="i">
-            <range min="0" max="600000" />
+            <range min="0" max="5000" />
             <default>500</default>
             <summary>Wallpaper fade-in duration in ms</summary>
         </key>

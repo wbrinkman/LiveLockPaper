@@ -73,6 +73,7 @@ export const Keys = {
     DEBUG_GPU_COLOR_CONVERSION: "debug-gpu-color-conversion",
     PAUSE_WHEN_HIDDEN_MODE: "pause-when-hidden-mode",
     DEBUG_PUSH_FRAME_DELIVERY: "debug-push-frame-delivery",
+    VIDEO_RENDERER: "video-renderer",
     DEBUG_USE_GTK4_SINK: "debug-use-gtk4-sink",
     DEBUG_GTK_HELPER_LOGS: "debug-gtk-helper-logs",
     DEBUG_SHOW_PANEL_BUTTON: "debug-show-panel-button",
@@ -117,4 +118,11 @@ export const PauseWhenHiddenMode = {
     OFF: 0,
     ALL_MONITORS: 1,
     ANY_MONITOR: 2,
-}
+};
+
+/** Values for Keys.VIDEO_RENDERER (gsettings int). */
+export const VideoRenderer = {
+    GTK4: 0,
+    APPSINK: 1,
+    MPV: 2,
+};
