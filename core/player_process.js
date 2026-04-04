@@ -3,17 +3,37 @@ import GioUnix from 'gi://GioUnix';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 
-// Wrapper for spawning and controlling the external GTK4 player process.
+// Wrapper for spawning and controlling the external GTK4 or mpv helper process.
 export class PlayerProcess {
-    constructor({ playerPath, config }) {
+    constructor({ playerPath, config, matchWindowsByTitleOnly = false }) {
         this._playerPath = playerPath;
         this._config = config;
+        this._matchWindowsByTitleOnly = !!matchWindowsByTitleOnly;
 
         this._pid = null;
         this._stdin = null;
         this._mapId = null;
         this._createdId = null;
         this._timeoutId = null;
+        // Last batch from waitForWindows (verify + coverage); mpv uses child PIDs vs gjs host PID.
+        this._windows = null;
+        this._childWindowPids = null;
+    }
+
+    _pidMatches(win) {
+        if (this._matchWindowsByTitleOnly)
+            return true;
+        return win && win.get_pid?.() === this._pid;
+    }
+
+    _playerArgv(configPath) {
+        const p = this._playerPath || '';
+        if (p.endsWith('.js')) {
+            const gjs = GLib.find_program_in_path('gjs');
+            if (gjs)
+                return [gjs, '-m', p, configPath];
+        }
+        return [p, configPath];
     }
 
     // Write config and spawn the subprocess.
@@ -27,18 +47,20 @@ export class PlayerProcess {
         const configJson = JSON.stringify(this._config);
         GLib.file_set_contents(configPath, configJson);
 
-        console.log(`[PlayerProcess] Spawning: ${this._playerPath} ${configPath}`);
+        // Run .js helpers via `gjs -m` so they work without the executable bit (zip/install often ships 0644).
+        const argv = this._playerArgv(configPath);
+        console.log(`[PlayerProcess] Spawning: ${argv.join(' ')}`);
 
         // Force GTK4 to NGL to avoid known Vulkan crashes on some drivers.
         let env = GLib.get_environ();
         env = GLib.environ_setenv(env, 'GSK_RENDERER', 'ngl', true);
 
         const [success, pid, stdinFd] = GLib.spawn_async_with_pipes(
-            null,                              // working directory (inherit)
-            [this._playerPath, configPath],    // argv
-            env,                               // envp (inherit + GSK_RENDERER=ngl)
-            GLib.SpawnFlags.SEARCH_PATH,       // flags
-            null                               // child_setup
+            null,
+            argv,
+            env,
+            GLib.SpawnFlags.SEARCH_PATH,
+            null
         );
 
         if (!success)
@@ -56,13 +78,15 @@ export class PlayerProcess {
 
     // Wait until helper windows are mapped and matched by PID.
     waitForWindows(count, timeoutMs, callback, errback) {
+        this._windows = null;
+        this._childWindowPids = null;
         const collected = [];
         const seen = new Set();
 
         // Set skip_taskbar override early to prevent dock from seeing the window
         this._createdId = global.display.connect('window-created', (_display, win) => {
             try {
-                if (!win || win.get_pid?.() !== this._pid) return;
+                if (!this._pidMatches(win)) return;
                 const title = win.get_title?.() ?? '';
                 if (!title.startsWith('LiveLockPaper-')) return;
                 
@@ -88,6 +112,7 @@ export class PlayerProcess {
                             get: () => true,
                             configurable: true,
                         });
+                        win.is_skip_pager = () => true;
                         win.__llp_skipPagerOverride = true;
                     } catch (_) {}
                 }
@@ -97,11 +122,11 @@ export class PlayerProcess {
         this._mapId = global.window_manager.connect_after('map', (_wm, windowActor) => {
             try {
                 const win = windowActor.get_meta_window();
-                if (!win || win.get_pid() !== this._pid) return;
+                if (!this._pidMatches(win)) return;
                 const title = win.get_title?.() ?? '';
 
-                // Ignore non-helper surfaces from the same PID
-                const match = title.match(/^LiveLockPaper-(\d+)$/);
+                // mpv often appends " — mpv" or the filename; match prefix only.
+                const match = title.match(/LiveLockPaper-(\d+)/);
                 if (!match)
                     return;
 
@@ -134,6 +159,7 @@ export class PlayerProcess {
                             get: () => true,
                             configurable: true,
                         });
+                        win.is_skip_pager = () => true;
                         win.__llp_skipPagerOverride = true;
                     } catch (_) {}
                 }
@@ -182,10 +208,29 @@ export class PlayerProcess {
                                     get: () => true,
                                     configurable: true,
                                 });
+                                win.is_skip_pager = () => true;
                                 win.__llp_skipPagerOverride = true;
                             } catch (_) {}
                         }
                     }
+                    this._windows = collected;
+                    this._childWindowPids = new Set();
+                    for (const w of collected) {
+                        const p = w.get_pid?.();
+                        if (p)
+                            this._childWindowPids.add(p);
+                    }
+                    collected.sort((a, b) => {
+                        const ma = Number.parseInt(
+                            (a.get_title?.() ?? '').match(/LiveLockPaper-(\d+)/)?.[1] ?? '999',
+                            10
+                        );
+                        const mb = Number.parseInt(
+                            (b.get_title?.() ?? '').match(/LiveLockPaper-(\d+)/)?.[1] ?? '999',
+                            10
+                        );
+                        return ma - mb;
+                    });
                     callback(collected);
                 }
             } catch (e) {
@@ -203,6 +248,8 @@ export class PlayerProcess {
                 this._createdId = null;
             }
             this._timeoutId = null;
+            this._windows = null;
+            this._childWindowPids = null;
             errback?.(`timed out waiting for windows (got ${collected.length}/${count})`);
             return GLib.SOURCE_REMOVE;
         });
@@ -278,5 +325,8 @@ export class PlayerProcess {
             try { this._stdin.close(null); } catch (_) {}
             this._stdin = null;
         }
+
+        this._windows = null;
+        this._childWindowPids = null;
     }
 }

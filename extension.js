@@ -18,7 +18,7 @@ import Meta from 'gi://Meta';
 import Pipeline from './core/pipeline.js';
 import { PlayerProcess } from './core/player_process.js';
 
-import { Keys, PauseWhenHiddenMode } from "./enums.js";
+import { Keys, PauseWhenHiddenMode, VideoRenderer, ScalingMode } from "./enums.js";
 import { setImageData } from './utils/set_image_data.js';
 import { isGtk4PaintableSinkAvailable } from './utils/check_dependencies.js';
 import { sendErrorNotification } from './utils/notifications.js';
@@ -153,6 +153,7 @@ export default class LockscreenExtension extends Extension {
             if (!this._settings) {
                 this._settings = this.getSettings();
             }
+            this._maybeMigrateVideoRendererSetting();
             this._syncKeepAwakeHooks();
             if (!this._panelVisibilityChangedId) {
                 this._panelVisibilityChangedId = this._settings.connect(
@@ -171,7 +172,7 @@ export default class LockscreenExtension extends Extension {
                     })
                 );
                 this._lockRuntimeSettingIds.push(
-                    this._settings.connect(`changed::${Keys.DEBUG_USE_GTK4_SINK}`, () => {
+                    this._settings.connect(`changed::${Keys.VIDEO_RENDERER}`, () => {
                         this._onLockRuntimeSettingChanged();
                     })
                 );
@@ -223,6 +224,13 @@ export default class LockscreenExtension extends Extension {
             if (this._gtk4SinkAvailable === undefined) {
                 this._gtk4SinkAvailable = isGtk4PaintableSinkAvailable();
                 console.log(`[LiveLockPaper] gtk4paintablesink available: ${this._gtk4SinkAvailable}`);
+            }
+            this._mpvProgram = GLib.find_program_in_path('mpv') || '';
+            console.log(`[LiveLockPaper] mpv in PATH: ${!!this._mpvProgram}`);
+            if (!this._mpvPathRefreshId) {
+                this._mpvPathRefreshId = this._settings.connect(`changed::${Keys.VIDEO_RENDERER}`, () => {
+                    this._mpvProgram = GLib.find_program_in_path('mpv') || '';
+                });
             }
 
             // Connect session-mode handler ONCE (idempotent)
@@ -283,6 +291,10 @@ export default class LockscreenExtension extends Extension {
             if (this._panelVisibilityChangedId && this._settings) {
                 try { this._settings.disconnect(this._panelVisibilityChangedId); } catch (_) {}
                 this._panelVisibilityChangedId = null;
+            }
+            if (this._mpvPathRefreshId && this._settings) {
+                try { this._settings.disconnect(this._mpvPathRefreshId); } catch (_) {}
+                this._mpvPathRefreshId = null;
             }
             if (this._lockRuntimeSettingIds && this._settings) {
                 for (const id of this._lockRuntimeSettingIds) {
@@ -363,26 +375,74 @@ export default class LockscreenExtension extends Extension {
         this._syncStatusIndicator();
     }
 
-    // Return true when GTK4 subprocess renderer should be used.
+    _maybeMigrateVideoRendererSetting() {
+        if (!this._settings)
+            return;
+        try {
+            const ur = this._settings.get_user_value(Keys.VIDEO_RENDERER);
+            if (ur != null)
+                return;
+            const ug = this._settings.get_user_value(Keys.DEBUG_USE_GTK4_SINK);
+            if (ug == null)
+                return;
+            const legacy = ug.unpack();
+            this._settings.set_int(Keys.VIDEO_RENDERER, legacy ? VideoRenderer.APPSINK : VideoRenderer.GTK4);
+        } catch (e) {
+            console.warn(`[LiveLockPaper] video-renderer migration skipped: ${e.message}`);
+        }
+    }
+
+    /** Resolved renderer after availability checks (may differ from Settings when mpv/GTK4 missing). */
+    _effectiveVideoRenderer() {
+        if (!this._settings)
+            return VideoRenderer.APPSINK;
+        let m = VideoRenderer.GTK4;
+        try {
+            m = this._settings.get_int(Keys.VIDEO_RENDERER);
+        } catch (e) {}
+        if (!Number.isFinite(m) || m < 0 || m > 2)
+            m = VideoRenderer.GTK4;
+
+        if (m === VideoRenderer.MPV) {
+            if (!this._mpvProgram) {
+                console.warn('[LiveLockPaper] mpv not found in PATH; falling back');
+                if (!this._mpvMissingNotified) {
+                    this._mpvMissingNotified = true;
+                    sendErrorNotification(
+                        'mpv was not found in PATH.\nInstall mpv or choose another renderer in Settings → Diagnostics.',
+                    );
+                }
+                m = VideoRenderer.GTK4;
+            }
+        }
+        if (m === VideoRenderer.GTK4) {
+            if (!this._gtk4SinkAvailable) {
+                console.warn('[LiveLockPaper] gtk4paintablesink not available, falling back to appsink');
+                if (!this._gtk4MissingNotified) {
+                    this._gtk4MissingNotified = true;
+                    sendErrorNotification(
+                        'gtk4paintablesink is not installed.\n' +
+                        'Install gstreamer-plugin-gtk4 (or gstreamer1.0-gtk4 on Debian/Ubuntu), ' +
+                        'or use the mpv / legacy appsink renderer in Settings.',
+                    );
+                }
+                m = VideoRenderer.APPSINK;
+            }
+        }
+        return m;
+    }
+
+    _subprocessPlayerPath() {
+        return this._effectiveVideoRenderer() === VideoRenderer.MPV
+            ? `${this.path}/external/mpv_run.js`
+            : `${this.path}/external/run.js`;
+    }
+
+    /** True when wallpaper/lock should use an external helper (GTK4 or mpv), not in-process appsink. */
     _shouldUseGtk4Sink() {
         if (!this._settings) return false;
-        const forceAppsink = this._settings.get_boolean(Keys.DEBUG_USE_GTK4_SINK);
-        if (forceAppsink)
-            return false;
-
-        if (!this._gtk4SinkAvailable) {
-            console.warn('[LiveLockPaper] gtk4paintablesink not available, falling back to appsink');
-            if (!this._gtk4MissingNotified) {
-                this._gtk4MissingNotified = true;
-                sendErrorNotification(
-                    'gtk4paintablesink is not installed.\n' +
-                    'Install gstreamer-plugin-gtk4 (or gstreamer1.0-gtk4 on Debian/Ubuntu) ' +
-                    'to use the default high-performance renderer.'
-                );
-            }
-            return false;
-        }
-        return true;
+        const m = this._effectiveVideoRenderer();
+        return m === VideoRenderer.GTK4 || m === VideoRenderer.MPV;
     }
 
     _onLockRuntimeSettingChanged() {
@@ -1115,16 +1175,25 @@ export default class LockscreenExtension extends Extension {
         // Other settings (outside groups)
         this._panelButton.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        this._menuGtkRendererSwitch = new PopupMenu.PopupSwitchMenuItem(
-            'Use GTK4 renderer',
-            !this._settings.get_boolean(Keys.DEBUG_USE_GTK4_SINK)
-        );
-        this._menuGtkRendererId = this._menuGtkRendererSwitch.connect('toggled', (_item, state) => {
-            // Schema key is inverted: true means force legacy appsink.
-            this._settings.set_boolean(Keys.DEBUG_USE_GTK4_SINK, !state);
-        });
-        this._panelButton.menu.addMenuItem(this._menuGtkRendererSwitch);
-
+        this._menuRendererGroup = new PopupMenu.PopupSubMenuMenuItem('Video renderer', true);
+        const rendererSub = this._menuRendererGroup.menu;
+        const makeRendererItem = (label, mode) => {
+            const it = new PopupMenu.PopupMenuItem(label);
+            it.connect('activate', () => {
+                try {
+                    this._settings.set_int(Keys.VIDEO_RENDERER, mode);
+                } catch (e) {}
+                this._updateRendererMenuChecks();
+                return false;
+            });
+            rendererSub.addMenuItem(it);
+            return it;
+        };
+        this._menuRendererGtk = makeRendererItem('GTK4 subprocess', VideoRenderer.GTK4);
+        this._menuRendererAppsink = makeRendererItem('Legacy appsink', VideoRenderer.APPSINK);
+        this._menuRendererMpv = makeRendererItem('mpv subprocess', VideoRenderer.MPV);
+        this._panelButton.menu.addMenuItem(this._menuRendererGroup);
+        this._updateRendererMenuChecks();
 
         this._menuRestartItem = new PopupMenu.PopupMenuItem('Restart Wallpaper');
         this._menuRestartId = this._menuRestartItem.connect('activate', () => {
@@ -1216,7 +1285,10 @@ export default class LockscreenExtension extends Extension {
             })
         );
         this._panelSignals.push(
-            this._settings.connect(`changed::${Keys.DEBUG_USE_GTK4_SINK}`, () => this._syncStatusIndicator())
+            this._settings.connect(`changed::${Keys.VIDEO_RENDERER}`, () => {
+                this._updateRendererMenuChecks();
+                this._syncStatusIndicator();
+            })
         );
         this._panelSignals.push(
             this._settings.connect(`changed::${Keys.WALLPAPER_DISABLE_ON_BATTERY}`, () => {
@@ -1284,9 +1356,6 @@ export default class LockscreenExtension extends Extension {
         if (this._menuMuteSwitch && this._menuMuteId) {
             try { this._menuMuteSwitch.disconnect(this._menuMuteId); } catch (_) {}
         }
-        if (this._menuGtkRendererSwitch && this._menuGtkRendererId) {
-            try { this._menuGtkRendererSwitch.disconnect(this._menuGtkRendererId); } catch (_) {}
-        }
         if (this._menuWallpaperDisableOnBatterySwitch && this._menuWallpaperDisableOnBatteryId) {
             try { this._menuWallpaperDisableOnBatterySwitch.disconnect(this._menuWallpaperDisableOnBatteryId); } catch (_) {}
         }
@@ -1312,7 +1381,10 @@ export default class LockscreenExtension extends Extension {
         this._menuPerMonitorSwitch = null;
         this._menuWallpaperBlurSwitch = null;
         this._menuMuteSwitch = null;
-        this._menuGtkRendererSwitch = null;
+        this._menuRendererGroup = null;
+        this._menuRendererGtk = null;
+        this._menuRendererAppsink = null;
+        this._menuRendererMpv = null;
         this._menuWallpaperDisableOnBatterySwitch = null;
         this._menuLockscreenDisableOnBatterySwitch = null;
         this._menuLsGrayscaleSwitch = null;
@@ -1326,7 +1398,6 @@ export default class LockscreenExtension extends Extension {
         this._menuPerMonitorId = null;
         this._menuWallpaperBlurId = null;
         this._menuMuteId = null;
-        this._menuGtkRendererId = null;
         this._menuWallpaperDisableOnBatteryId = null;
         this._menuLockscreenDisableOnBatteryId = null;
         this._menuLsGrayscaleId = null;
@@ -1479,6 +1550,27 @@ export default class LockscreenExtension extends Extension {
         this._menuPauseWhenHiddenItem.label.text = label;
     }
 
+    _updateRendererMenuChecks() {
+        if (!this._settings || !this._menuRendererGtk)
+            return;
+        let m = VideoRenderer.GTK4;
+        try {
+            m = this._settings.get_int(Keys.VIDEO_RENDERER);
+        } catch (e) {
+            return;
+        }
+        const mark = (item, on) => {
+            if (!item)
+                return;
+            try {
+                item.setOrnament(on ? PopupMenu.Ornament.CHECK : PopupMenu.Ornament.NONE);
+            } catch (_) {}
+        };
+        mark(this._menuRendererGtk, m === VideoRenderer.GTK4);
+        mark(this._menuRendererAppsink, m === VideoRenderer.APPSINK);
+        mark(this._menuRendererMpv, m === VideoRenderer.MPV);
+    }
+
     _updatePauseWhenHiddenMenuState() {
         if (!this._menuPauseWhenHiddenItem) return;
         this._updatePauseWhenHiddenMenuLabel();
@@ -1516,9 +1608,7 @@ export default class LockscreenExtension extends Extension {
             this._menuMuteSwitch.setSensitive(canToggleWallpaperFeatures);
         }
 
-        const useGtkRenderer = !this._settings.get_boolean(Keys.DEBUG_USE_GTK4_SINK);
-        if (this._menuGtkRendererSwitch.state !== useGtkRenderer)
-            this._menuGtkRendererSwitch.setToggleState(useGtkRenderer);
+        this._updateRendererMenuChecks();
 
         if (this._menuWallpaperDisableOnBatterySwitch) {
             const disableOnBattery = this._settings.get_boolean(Keys.WALLPAPER_DISABLE_ON_BATTERY);
@@ -1768,7 +1858,8 @@ export default class LockscreenExtension extends Extension {
                     if (fps && fps > 0) return fps;
                 }
             } catch (e) { }
-            return manualFramerate;
+            // Auto FPS: manual slider must not throttle when metadata is missing.
+            return 30;
         };
 
         // Track play count when video starts
@@ -2048,7 +2139,7 @@ export default class LockscreenExtension extends Extension {
             brightness: this._blurBrightness,
         };
 
-        // Spawn the subprocess
+        // mpv: pass Shell monitor layout so LiveLockPaper-<i> matches layoutManager index (Gdk order can differ).
         const config = {
             scalingMode,
             volume,
@@ -2057,11 +2148,19 @@ export default class LockscreenExtension extends Extension {
             preferHwDecoder,
             randomOrder,
             monitors: subprocessMonitors,
+            monitorGeometries: monitors.map(m => ({
+                x: m.x,
+                y: m.y,
+                width: m.width,
+                height: m.height,
+            })),
         };
 
+        const renderer = this._effectiveVideoRenderer();
         this._lockPlayerProcess = new PlayerProcess({
-            playerPath: this.path + '/external/run.js',
+            playerPath: this._subprocessPlayerPath(),
             config,
+            matchWindowsByTitleOnly: renderer === VideoRenderer.MPV,
         });
 
         try {
@@ -2097,14 +2196,31 @@ export default class LockscreenExtension extends Extension {
             // Map-event ordering is not stable, use window title index
             windows.forEach((win, i) => {
                 const title = win.get_title() || '';
-                const match = title.match(/^LiveLockPaper-(\d+)$/);
+                const match = title.match(/LiveLockPaper-(\d+)/);
                 const monitorIndex = match ? Number.parseInt(match[1], 10) : i;
                 const targetMonitor = monitors[monitorIndex] || monitors[i] || monitors[0];
 
                 if (targetMonitor) {
-                    // Position-only: don't resize (avoids Mutter auto-maximize).
                     try {
-                        win.move_frame(false, targetMonitor.x, targetMonitor.y);
+                        if (renderer === VideoRenderer.MPV) {
+                            let gx = targetMonitor.x;
+                            let gy = targetMonitor.y;
+                            let gw = targetMonitor.width;
+                            let gh = targetMonitor.height;
+                            try {
+                                const g = global.display.get_monitor_geometry(targetMonitor.index);
+                                if (g?.width > 0 && g?.height > 0) {
+                                    gx = g.x;
+                                    gy = g.y;
+                                    gw = g.width;
+                                    gh = g.height;
+                                }
+                            } catch (_) {}
+                            win.move_resize_frame(false, gx, gy, gw, gh);
+                        } else {
+                            // GTK: position-only (avoids Mutter auto-maximize quirks).
+                            win.move_frame(false, targetMonitor.x, targetMonitor.y);
+                        }
                     } catch (_) {}
                 }
                 try { win.set_skip_taskbar(true); } catch (_) {
@@ -2200,11 +2316,23 @@ export default class LockscreenExtension extends Extension {
             wrapper.add_child(windowActor);
             windowActor.reactive = false;
 
-            // Translation-only fitting avoids resampling artifacts.
+            const lockScaling = this._scalingMode ?? ScalingMode.STRETCH;
+            const lockRenderer = this._effectiveVideoRenderer();
             const fixPositionAndScale = () => {
-                windowActor.set_translation(-Math.round(windowActor.x), -Math.round(windowActor.y), 0);
-                windowActor.set_pivot_point(0, 0);
-                windowActor.set_scale(1, 1);
+                if (lockRenderer === VideoRenderer.MPV) {
+                    this._layoutMpvSubprocessWallpaperActor(
+                        windowActor,
+                        monitor.width,
+                        monitor.height,
+                        lockScaling
+                    );
+                } else {
+                    const ax = windowActor.x;
+                    const ay = windowActor.y;
+                    windowActor.set_pivot_point(0, 0);
+                    windowActor.set_scale(1, 1);
+                    windowActor.set_translation(-Math.round(ax), -Math.round(ay), 0);
+                }
             };
             let lockFixQueued = 0;
             const queueFixPositionAndScale = () => {
@@ -3349,12 +3477,106 @@ export default class LockscreenExtension extends Extension {
 
     // Subprocess wallpaper (gtk4paintablesink)
 
+    /**
+     * Full Meta monitor geometry (under panels/docks). layoutManager monitor fields usually match,
+     * but get_monitor_geometry is authoritative and fixes cases where the video stopped above a dock.
+     */
+    _wallpaperExtentsWithSeamBleed(monitor, _allMonitors, _enableBleed) {
+        try {
+            const g = global.display.get_monitor_geometry(monitor.index);
+            if (g && g.width > 0 && g.height > 0)
+                return { x: g.x, y: g.y, width: g.width, height: g.height };
+        } catch (_) {}
+        return {
+            x: monitor.x,
+            y: monitor.y,
+            width: monitor.width,
+            height: monitor.height,
+        };
+    }
+
+    _layoutMpvSubprocessWallpaperActor(windowActor, wrapW, wrapH, scalingMode) {
+        if (!windowActor)
+            return;
+        const ax = windowActor.x;
+        const ay = windowActor.y;
+        const aw = Math.max(1, windowActor.width);
+        const ah = Math.max(1, windowActor.height);
+        // STRETCH: never scale in Clutter — fractional actor scale on a Wayland video surface causes
+        // moiré / comb-like lines; standalone mpv does not do this. Resize via move_resize_frame only.
+        if (scalingMode === ScalingMode.STRETCH) {
+            windowActor.set_pivot_point(0, 0);
+            windowActor.set_scale(1, 1);
+            windowActor.set_translation(-Math.round(ax), -Math.round(ay), 0);
+            return;
+        }
+        const sx = wrapW / aw;
+        const sy = wrapH / ah;
+        let scaleX = sx;
+        let scaleY = sy;
+        if (scalingMode === ScalingMode.COVER) {
+            const s = Math.max(sx, sy);
+            scaleX = scaleY = s;
+        } else if (scalingMode === ScalingMode.FIT) {
+            const s = Math.min(sx, sy);
+            scaleX = scaleY = s;
+        }
+        windowActor.set_pivot_point(0, 0);
+        windowActor.set_scale(scaleX, scaleY);
+        const tw = aw * scaleX;
+        const th = ah * scaleY;
+        const ox = (wrapW - tw) / 2;
+        const oy = (wrapH - th) / 2;
+        windowActor.set_translation(
+            -Math.round(ax) + Math.round(ox),
+            -Math.round(ay) + Math.round(oy),
+            0
+        );
+    }
+
+    _syncWpMpvWallpaperGeometry() {
+        if (!this._active || !this._wpPlayerProcess)
+            return;
+        if (this._effectiveVideoRenderer() !== VideoRenderer.MPV)
+            return;
+        const mons = Main.layoutManager.monitors;
+        const scalingMode = this._settings.get_int(Keys.WALLPAPER_SCALING_MODE);
+        for (let idx = 0; idx < mons.length; idx++) {
+            const ex = this._wallpaperExtentsWithSeamBleed(mons[idx], mons, true);
+            const wrapper = this._wpWrapperByMonitor?.[idx];
+            if (wrapper) {
+                try {
+                    wrapper.set_position(ex.x, ex.y);
+                    wrapper.set_size(ex.width, ex.height);
+                } catch (_) {}
+            }
+            const win = this._wpReparentMetaByIdx?.[idx];
+            if (win) {
+                try {
+                    win.move_resize_frame(true, ex.x, ex.y, ex.width, ex.height);
+                } catch (_) {}
+            }
+            const wa = this._wpWindowActors?.[idx];
+            if (wa)
+                this._layoutMpvSubprocessWallpaperActor(wa, ex.width, ex.height, scalingMode);
+        }
+        this._refreshGtkHelperWindowHints('mpv-geom-sync');
+    }
+
     _enableWallpaperSubprocess() {
         console.log('[Wallpaper:GTK4] Setting up subprocess wallpaper');
 
         this._wpActors = [];
         this._wpPlayerProcess = null;
         this._wpWindowActors = {};
+        this._wpWrapperByMonitor = {};
+        this._wpReparentMetaByIdx = {};
+        if (this._wpMpvGeometrySyncIds?.length) {
+            for (const id of this._wpMpvGeometrySyncIds) {
+                try { GLib.source_remove(id); } catch (_) {}
+            }
+        }
+        this._wpMpvGeometrySyncIds = null;
         this._wpSubprocessMonitorVideos = [];
         this._wallpaperWasPausedForSleep = false;
 
@@ -3370,6 +3592,8 @@ export default class LockscreenExtension extends Extension {
         const fadeInDuration = this._settings.get_int(Keys.WALLPAPER_FADE_IN_DURATION);
         const blurRadius = this._settings.get_int(Keys.WALLPAPER_BLUR_RADIUS);
         const blurBrightness = this._settings.get_double(Keys.WALLPAPER_BLUR_BRIGHTNESS);
+        const wpThemeCtx = St.ThemeContext.get_for_stage(global.stage);
+        const mpvBlurRadiusScaled = Math.round(blurRadius * (wpThemeCtx.scale_factor || 1));
         const pauseWhenHiddenMode = this._settings.get_int(Keys.PAUSE_WHEN_HIDDEN_MODE) ?? PauseWhenHiddenMode.ALL_MONITORS;
         const pauseWhenHidden = pauseWhenHiddenMode !== PauseWhenHiddenMode.OFF;
 
@@ -3466,11 +3690,19 @@ export default class LockscreenExtension extends Extension {
             renderScale,
             randomOrder,
             monitors: subprocessMonitors,
+            wallpaperBlurRadius: mpvBlurRadiusScaled,
+            wallpaperBlurBrightness: blurBrightness,
+            monitorGeometries: monitors.map(m => {
+                const ex = this._wallpaperExtentsWithSeamBleed(m, monitors, false);
+                return { x: ex.x, y: ex.y, width: ex.width, height: ex.height };
+            }),
         };
 
+        const renderer = this._effectiveVideoRenderer();
         this._wpPlayerProcess = new PlayerProcess({
-            playerPath: this.path + '/external/run.js',
+            playerPath: this._subprocessPlayerPath(),
             config: playerConfig,
+            matchWindowsByTitleOnly: renderer === VideoRenderer.MPV,
         });
 
         try {
@@ -3483,6 +3715,7 @@ export default class LockscreenExtension extends Extension {
         }
 
         const monitorCount = monitors.length;
+        const wpRenderer = renderer;
         this._wpPlayerProcess.waitForWindows(monitorCount, 10000, (windows) => {
             console.log(`[Wallpaper:GTK4] All ${windows.length} window(s) mapped`);
             this._debugDumpWindowSnapshot('wallpaper-map-callback');
@@ -3491,6 +3724,7 @@ export default class LockscreenExtension extends Extension {
             const adjustedBlurRadius = blurRadius * themeContext.scale_factor;
             this._wpPositionSignals = [];
 
+            const finishSubprocessWallpaperReparent = () => {
             // Use title-based monitor index — this is set explicitly by player.js
             // win.get_monitor() is not reliable here
             // Wayland may not have placed the window on the correct monitor yet.
@@ -3512,6 +3746,21 @@ export default class LockscreenExtension extends Extension {
                     console.log(`[Wallpaper:GTK4] ${this._wpActors.length} window(s) reparented and playing`);
                     this._debugDumpWindowSnapshot('wallpaper-playing');
 
+                    if (wpRenderer === VideoRenderer.MPV) {
+                        if (this._wpMpvGeometrySyncIds?.length) {
+                            for (const id of this._wpMpvGeometrySyncIds) {
+                                try { GLib.source_remove(id); } catch (_) {}
+                            }
+                        }
+                        this._wpMpvGeometrySyncIds = [180, 650].map(ms =>
+                            GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+                                this._syncWpMpvWallpaperGeometry();
+                                return GLib.SOURCE_REMOVE;
+                            })
+                        );
+                        this._refreshGtkHelperWindowHints('wallpaper-reparent-done');
+                    }
+
                     // Set up pause-when-hidden if enabled
                     if (pauseWhenHidden) {
                         // Mark as not ready initially to prevent immediate pausing
@@ -3531,7 +3780,7 @@ export default class LockscreenExtension extends Extension {
             
             for (const win of windows) {
                 const title = win.get_title() || '';
-                const match = title.match(/^LiveLockPaper-(\d+)$/);
+                const match = title.match(/LiveLockPaper-(\d+)/);
                 const monitorIndex = match ? Number.parseInt(match[1], 10) : 0;
 
                 const monitor = monitors[monitorIndex];
@@ -3542,10 +3791,16 @@ export default class LockscreenExtension extends Extension {
                     continue;
                 }
 
-                // Position window on correct monitor immediately
-                // This must happen before reparenting to ensure correct placement
+                const useSeamBleed = wpRenderer === VideoRenderer.MPV;
+                const extents = this._wallpaperExtentsWithSeamBleed(monitor, monitors, useSeamBleed);
+
+                // mpv: user_op=true — programmatic false is often clamped to the work area (gap above dock).
+                // GTK: keep false to match existing Mutter behavior for Gtk surfaces.
                 try {
-                    win.move_resize_frame(false, monitor.x, monitor.y, monitor.width, monitor.height);
+                    if (wpRenderer === VideoRenderer.MPV)
+                        win.move_resize_frame(true, extents.x, extents.y, extents.width, extents.height);
+                    else
+                        win.move_resize_frame(false, extents.x, extents.y, extents.width, extents.height);
                 } catch (_) {}
 
                 // Ensure skip flags are set (they should already be set in player_process.js)
@@ -3562,6 +3817,7 @@ export default class LockscreenExtension extends Extension {
                 }
 
                 this._wpWindowActors[monitorIndex] = windowActor;
+                this._wpReparentMetaByIdx[monitorIndex] = win;
                 const parent = windowActor.get_parent();
                 if (parent) parent.remove_child(windowActor);
 
@@ -3570,14 +3826,17 @@ export default class LockscreenExtension extends Extension {
                     // to Mutter's fullscreen layer (above the panel/dock) and
                     // can cause the compositor to reclaim the actor.
                     const wrapper = new Clutter.Actor({
-                        x: monitor.x,
-                        y: monitor.y,
-                        width: monitor.width,
-                        height: monitor.height,
+                        x: extents.x,
+                        y: extents.y,
+                        width: extents.width,
+                        height: extents.height,
                         clip_to_allocation: true,
                     });
+                    this._wpWrapperByMonitor[monitorIndex] = wrapper;
 
-                    if (adjustedBlurRadius > 0) {
+                    // GTK/appsink: Shell blur on the wrapper. mpv: blur is done inside mpv (lavfi gblur) — see
+                    // mpv_run.js — Shell.BlurEffect on subsurface video caused banding; vf blur matches prefs.
+                    if (adjustedBlurRadius > 0 && wpRenderer !== VideoRenderer.MPV) {
                         wrapper.add_effect(new Shell.BlurEffect({
                             name: 'wallpaper-blur',
                             radius: adjustedBlurRadius,
@@ -3588,13 +3847,21 @@ export default class LockscreenExtension extends Extension {
                     wrapper.add_child(windowActor);
                     windowActor.reactive = false;
 
-                    // Translation-only fitting avoids resampling artifacts.
+                    const wrapW = extents.width;
+                    const wrapH = extents.height;
+                    // GTK: translation-only. mpv: scale into wrapper (see _layoutMpvSubprocessWallpaperActor).
                     const fixPositionAndScale = () => {
-                        const ax = windowActor.x;
-                        const ay = windowActor.y;
-                        windowActor.set_translation(-Math.round(ax), -Math.round(ay), 0);
-                        windowActor.set_pivot_point(0, 0);
-                        windowActor.set_scale(1, 1);
+                        if (wpRenderer === VideoRenderer.MPV)
+                            this._layoutMpvSubprocessWallpaperActor(windowActor, wrapW, wrapH, scalingMode);
+                        else {
+                            windowActor.set_pivot_point(0, 0);
+                            windowActor.set_scale(1, 1);
+                            windowActor.set_translation(
+                                -Math.round(windowActor.x),
+                                -Math.round(windowActor.y),
+                                0
+                            );
+                        }
                     };
                     let wpFixQueued = 0;
                     const queueFixPositionAndScale = () => {
@@ -3624,6 +3891,26 @@ export default class LockscreenExtension extends Extension {
                     reparentedCount++;
                     checkAllReparented();
             }
+            };
+
+            // mpv: one idle after map so the compositor has a frame before reparent (reduces wrong actor state).
+            // GTK: reparent immediately like before.
+            const runWallpaperReparent = () => {
+                try {
+                    finishSubprocessWallpaperReparent();
+                } catch (e) {
+                    console.error(`[Wallpaper:GTK4] reparent failed: ${e.message}\n${e.stack}`);
+                    this._syncStatusIndicator();
+                }
+            };
+            if (wpRenderer === VideoRenderer.MPV) {
+                GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                    runWallpaperReparent();
+                    return GLib.SOURCE_REMOVE;
+                });
+            } else {
+                runWallpaperReparent();
+            }
         }, (err) => {
             console.error(`[Wallpaper:GTK4] ${err}`);
             this._debugDumpWindowSnapshot('wallpaper-map-error');
@@ -3641,6 +3928,7 @@ export default class LockscreenExtension extends Extension {
 
         this._wpRestackedId = global.display.connect('restacked', () => {
             this._checkDesktopVisibilitySubprocess();
+            this._scheduleWpHelperHintRefreshDebounced();
         });
 
         // Watch for window state changes (fullscreen, maximize, etc.)
@@ -3679,6 +3967,24 @@ export default class LockscreenExtension extends Extension {
         console.log('[Wallpaper:GTK4] Pause-when-hidden: ✓ enabled');
     }
 
+    // mpv Wayland windows often lose skip_taskbar visibility when the stack changes; re-assert like GTK.
+    _scheduleWpHelperHintRefreshDebounced() {
+        if (!this._wpPlayerProcess)
+            return;
+        if (this._wpHintsRestackTimeout) {
+            GLib.source_remove(this._wpHintsRestackTimeout);
+            this._wpHintsRestackTimeout = null;
+        }
+        this._wpHintsRestackTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 160, () => {
+            this._wpHintsRestackTimeout = null;
+            try {
+                if (this._active && this._wpPlayerProcess)
+                    this._refreshGtkHelperWindowHints('restack-debounce');
+            } catch (_) {}
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     _checkDesktopVisibilitySubprocess() {
         if (Main.sessionMode.currentMode !== 'user') return;
         if (!this._wpPlayerProcess) return;
@@ -3700,7 +4006,7 @@ export default class LockscreenExtension extends Extension {
         }
 
         const monitors = Main.layoutManager.monitors;
-        const coverage = monitors.map(m => ({ index: m.index, covered: this._isMonitorFullyCovered(m.index) }));
+        const coverage = monitors.map(m => ({ index: m.index, covered: this._isMonitorFullyCovered(m) }));
         
         let shouldPause = false;
         if (pauseMode === PauseWhenHiddenMode.ALL_MONITORS) {
@@ -3742,7 +4048,7 @@ export default class LockscreenExtension extends Extension {
             Keys.WALLPAPER_FADE_IN_DURATION, Keys.WALLPAPER_QUALITY,
             Keys.DEBUG_PREFER_HW_DECODER, Keys.DEBUG_GPU_COLOR_CONVERSION,
             Keys.DEBUG_PUSH_FRAME_DELIVERY,
-            Keys.DEBUG_USE_GTK4_SINK,
+            Keys.VIDEO_RENDERER,
         ];
         watchKeys.forEach(key => {
             const id = this._settings.connect('changed::' + key, () => {
@@ -3815,6 +4121,7 @@ export default class LockscreenExtension extends Extension {
                     // in case Mutter resets them during compositor transitions.
                     GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
                         this._refreshGtkHelperWindowHints('settings-restart-500ms');
+                        this._syncWpMpvWallpaperGeometry();
                         this._debugDumpWindowSnapshot('settings-restart-500ms');
                         // Only verify windows if using GTK4 sink (PlayerProcess)
                         // and only if we're not already in a restart
@@ -3858,7 +4165,8 @@ export default class LockscreenExtension extends Extension {
                 if (hadSubprocess) {
                     // Drain old helper windows before respawn to avoid overlap
                     // races that can hide dock/top bar on some systems.
-                    this._waitForGtkHelperDrain(previousWpPid, 3000, finishRestart);
+                    const drainMs = this._effectiveVideoRenderer() === VideoRenderer.MPV ? 5000 : 3000;
+                    this._waitForGtkHelperDrain(previousWpPid, drainMs, finishRestart);
                 } else {
                     finishRestart();
                 }
@@ -3929,6 +4237,14 @@ export default class LockscreenExtension extends Extension {
     // Tear down wallpaper runtime without touching settings watchers.
     _teardownWallpaper({ keepRestartState = false } = {}) {
         this._debugDumpWindowSnapshot('teardown-start');
+        if (this._wpMpvGeometrySyncIds?.length) {
+            for (const id of this._wpMpvGeometrySyncIds) {
+                try { GLib.source_remove(id); } catch (_) {}
+            }
+            this._wpMpvGeometrySyncIds = null;
+        }
+        this._wpWrapperByMonitor = {};
+        this._wpReparentMetaByIdx = {};
         if (this._wpRestartTimeout) {
             GLib.Source.remove(this._wpRestartTimeout);
             this._wpRestartTimeout = null;
@@ -4092,7 +4408,7 @@ export default class LockscreenExtension extends Extension {
         if (pauseMode === PauseWhenHiddenMode.OFF) return;
 
         const monitors = Main.layoutManager.monitors;
-        const coverage = monitors.map(m => ({ index: m.index, covered: this._isMonitorFullyCovered(m.index) }));
+        const coverage = monitors.map(m => ({ index: m.index, covered: this._isMonitorFullyCovered(m) }));
         
         let shouldPause = false;
         if (pauseMode === PauseWhenHiddenMode.ALL_MONITORS) {
@@ -4117,9 +4433,27 @@ export default class LockscreenExtension extends Extension {
         }
     }
 
-    // Return true when a monitor is fully covered by a normal window.
-    _isMonitorFullyCovered(monitorIndex) {
+    _rectOverlapPixels(a, b) {
+        const ix = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+        const iy = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+        return ix * iy;
+    }
+
+    // Return true when this layout monitor is fully covered by a normal window.
+    // Uses frame/intersection with the monitor rect instead of get_monitor(): with reparented
+    // mpv/GTK helpers on Wayland, get_monitor() often disagrees with global geometry (logs show
+    // LiveLockPaper-0 on mon=1 and LiveLockPaper-1 on mon=0 while wrappers use layout slots).
+    _isMonitorFullyCovered(monitor) {
         try {
+            if (!monitor || monitor.width <= 0 || monitor.height <= 0)
+                return false;
+            const mx = monitor.x;
+            const my = monitor.y;
+            const mw = monitor.width;
+            const mh = monitor.height;
+            const monitorArea = mw * mh;
+            const mrect = { x: mx, y: my, width: mw, height: mh };
+
             const windowActors = global.get_window_actors();
             const wpPid = this._wpPlayerProcess?.pid ?? null;
             const lockPid = this._lockPlayerProcess?.pid ?? null;
@@ -4135,15 +4469,26 @@ export default class LockscreenExtension extends Extension {
                 const pid = win.get_pid?.() ?? 0;
                 if ((wpPid && pid === wpPid) || (lockPid && pid === lockPid))
                     continue;
-                
+                const wpChildren = this._wpPlayerProcess?._childWindowPids;
+                if (wpChildren && wpChildren.has(pid))
+                    continue;
+                const lockChildren = this._lockPlayerProcess?._childWindowPids;
+                if (lockChildren && lockChildren.has(pid))
+                    continue;
+
                 // Also ignore helper windows by title in case PID filtering races
                 // during lock/unlock teardown (PID can be gone before actor cleanup).
                 const title = win.get_title?.() ?? '';
                 if (title.startsWith('LiveLockPaper-'))
                     continue;
-                
-                // Skip if not on the target monitor
-                if (win.get_monitor() !== monitorIndex) continue;
+
+                const fr = win.get_frame_rect();
+                const overlap = this._rectOverlapPixels(
+                    { x: fr.x, y: fr.y, width: fr.width, height: fr.height },
+                    mrect
+                );
+                if (overlap < monitorArea * 0.45)
+                    continue;
                 
                 // Only check normal windows (not desktop, dock, etc.)
                 if (win.window_type !== Meta.WindowType.NORMAL) continue;
@@ -4157,17 +4502,10 @@ export default class LockscreenExtension extends Extension {
                 
                 // Also check for maximized windows that cover the entire monitor
                 if (win.maximized_horizontally && win.maximized_vertically) {
-                    // Double-check geometry to ensure it actually covers the monitor
-                    const monitor = Main.layoutManager.monitors[monitorIndex];
-                    if (monitor) {
-                        const frame = win.get_frame_rect();
-                        // Check if window covers at least 95% of monitor
-                        const monitorArea = monitor.width * monitor.height;
-                        const frameArea = frame.width * frame.height;
-                        const coverageRatio = monitorArea > 0 ? frameArea / monitorArea : 0;
-                        if (coverageRatio >= 0.95) {
-                            return true;
-                        }
+                    const frameArea = fr.width * fr.height;
+                    const coverageRatio = monitorArea > 0 ? frameArea / monitorArea : 0;
+                    if (coverageRatio >= 0.95) {
+                        return true;
                     }
                 }
             }
@@ -4191,7 +4529,9 @@ export default class LockscreenExtension extends Extension {
                 const title = win.get_title?.() ?? '';
                 const pid = win.get_pid?.() ?? 0;
                 const isHelper = title.startsWith('LiveLockPaper-') ||
-                    (wpPid && pid === wpPid) || (lockPid && pid === lockPid);
+                    (wpPid && pid === wpPid) || (lockPid && pid === lockPid) ||
+                    (this._wpPlayerProcess?._childWindowPids?.has(pid)) ||
+                    (this._lockPlayerProcess?._childWindowPids?.has(pid));
                 if (!isHelper)
                     continue;
 
@@ -4210,6 +4550,16 @@ export default class LockscreenExtension extends Extension {
                 }
                 try { win.set_skip_pager(true); } catch (_) {
                     try { win.skip_pager = true; } catch (_) {}
+                }
+                if (!win.__llp_skipPagerOverride) {
+                    try {
+                        Object.defineProperty(win, 'skip_pager', {
+                            get: () => true,
+                            configurable: true,
+                        });
+                        win.is_skip_pager = () => true;
+                        win.__llp_skipPagerOverride = true;
+                    } catch (_) {}
                 }
 
                 const isFs = win.is_fullscreen?.() ?? false;
@@ -4306,6 +4656,10 @@ export default class LockscreenExtension extends Extension {
         if (this._wpOverviewHiddenId) {
             Main.overview.disconnect(this._wpOverviewHiddenId);
             this._wpOverviewHiddenId = null;
+        }
+        if (this._wpHintsRestackTimeout) {
+            GLib.source_remove(this._wpHintsRestackTimeout);
+            this._wpHintsRestackTimeout = null;
         }
         this._wpDesktopHidden = false;
     }
@@ -4581,7 +4935,8 @@ export default class LockscreenExtension extends Extension {
                 if (fps && fps > 0) return fps;
             }
         } catch (e) { }
-        return manualFramerate;
+        // Auto FPS: do not fall back to manual FPS (e.g. 2) for stagger / logging / changeVideo.
+        return 30;
     }
 
     // Select the next item from a playlist state.

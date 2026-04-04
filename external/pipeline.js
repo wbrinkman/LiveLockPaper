@@ -4,7 +4,45 @@ import GstController from 'gi://GstController';
 
 const FADE_DURATION = 300;
 
-/** Raise VA/NVDEC decoder ranks before any playbin is built (safe to call once per process). */
+const PLAY_FLAG_FORCE_FILTERS = 0x800;
+
+function gtkColourFixEnabled() {
+    const v = GLib.getenv('LIVELOCKPAPER_GTK_COLOR_FIX');
+    return v !== '0' && v !== 'false' && v !== 'off';
+}
+
+function capsNeedHeavyColourFix(capsStr) {
+    if (!capsStr || capsStr.length < 8)
+        return false;
+    const s = capsStr;
+
+    if (s.includes('colorimetry=sRGB') || s.includes('colorimetry=(string)sRGB'))
+        return false;
+    if (s.includes('color-range=full') || s.includes('color-range=(string)full'))
+        return false;
+
+    const hasColorimetryField = s.includes('colorimetry=');
+    const isBgra =
+        s.includes('format=BGRA') ||
+        s.includes('format=(string)BGRA');
+
+    if (isBgra && !hasColorimetryField)
+        return false;
+
+    const limitedBtNoFull =
+        /(bt601|bt709|bt2020)/i.test(s) &&
+        !s.includes('color-range=full') &&
+        !s.includes('color-range=(string)full');
+
+    if (limitedBtNoFull)
+        return true;
+
+    if (!hasColorimetryField)
+        return true;
+
+    return false;
+}
+
 export function boostHwDecoderRanks() {
     const hwDecoders = [
         'vah264dec', 'vah265dec', 'vavp9dec', 'vaav1dec',
@@ -34,7 +72,6 @@ export function boostHwDecoderRanks() {
     }
 }
 
-// Single gtk4paintablesink-based pipeline with playlist support.
 export default class Pipeline {
     constructor({ videos, volume, loop, randomOrder, useVideorate, framerate, targetWidth = 0, targetHeight = 0, initialIndex = null, onTrackSwitch = null }) {
         this._bus = null;
@@ -43,10 +80,10 @@ export default class Pipeline {
         this._volumeElement = null;
         this._volumeControl = null;
 
-        this._videos = videos;          // Array of file paths
+        this._videos = videos;
         this._currentIndex = 0;
         this._volume = volume;
-        this._loop = loop;              // Keep cycling the playlist
+        this._loop = loop;
         this._randomOrder = randomOrder || false;
         this._useVideorate = useVideorate;
         this._framerate = framerate;
@@ -55,6 +92,12 @@ export default class Pipeline {
         this._initialIndex = Number.isInteger(initialIndex) ? initialIndex : null;
         this._queuedFromAboutToFinish = false;
         this._onTrackSwitch = typeof onTrackSwitch === 'function' ? onTrackSwitch : null;
+        this._lastLoggedColourCaps = '';
+        this._colourFixPhase = 'light';
+        this._colourReconfigureSent = false;
+        this._colourAwaitingPostReconfigure = false;
+        this._colourFixTimerId = 0;
+        this._weSetForceFilters = false;
     }
 
     init() {
@@ -78,6 +121,7 @@ export default class Pipeline {
                 throw new Error('Failed to create playbin element');
 
             this._initVideo();
+            this._initPlaybinColourFix();
             this._initAudio();
             this._initBusWatch();
 
@@ -91,6 +135,254 @@ export default class Pipeline {
         } catch (e) {
             this.destroy();
             throw e;
+        }
+    }
+
+    _initPlaybinColourFix() {
+        if (!this._pipeline)
+            return;
+        if (!gtkColourFixEnabled()) {
+            this._clearOurPlaybinColourFlags();
+            try {
+                this._pipeline.set_property('video-filter', null);
+            } catch (e) {}
+            return;
+        }
+        this._colourFixPhase = 'light';
+        this._colourReconfigureSent = false;
+        this._colourAwaitingPostReconfigure = false;
+        this._clearOurPlaybinColourFlags();
+        try {
+            this._pipeline.set_property('video-filter', null);
+        } catch (e) {}
+    }
+
+    _clearOurPlaybinColourFlags() {
+        if (!this._pipeline || !this._weSetForceFilters)
+            return;
+        let flags = 0;
+        try {
+            flags = this._pipeline.get_property('flags');
+        } catch (e) {
+            return;
+        }
+        const next = flags & ~PLAY_FLAG_FORCE_FILTERS;
+        if (next !== flags) {
+            try {
+                this._pipeline.set_property('flags', next);
+            } catch (e2) {}
+        }
+        this._weSetForceFilters = false;
+    }
+
+    _applyPlaybinForceFiltersOnly() {
+        if (!this._pipeline)
+            return;
+        let flags = 0;
+        try {
+            flags = this._pipeline.get_property('flags');
+        } catch (e) {
+            return;
+        }
+        const next = flags | PLAY_FLAG_FORCE_FILTERS;
+        if (next === flags) {
+            this._weSetForceFilters = true;
+            return;
+        }
+        try {
+            this._pipeline.set_property('flags', next);
+            this._weSetForceFilters = true;
+            console.log(`[ExtPipeline] colour fix: playbin force-filters on (native-video unchanged), flags 0x${flags.toString(16)} → 0x${next.toString(16)}`);
+        } catch (e2) {}
+    }
+
+    _buildCpuColourFilterBin() {
+        const bin = Gst.parse_bin_from_description(
+            'videoconvert name=llp_colour_vc ! capsfilter name=llp_colour_cf',
+            true,
+        );
+        if (!bin)
+            return null;
+        const vc = bin.get_by_name('llp_colour_vc');
+        const cf = bin.get_by_name('llp_colour_cf');
+        if (!vc || !cf)
+            return null;
+        try {
+            vc.set_property('dither', 0);
+        } catch (e) {}
+        try {
+            const n = GLib.get_num_processors();
+            if (n > 0)
+                vc.set_property('n-threads', n);
+        } catch (e) {}
+        const capsStrs = [
+            'video/x-raw,format=BGRA,colorimetry=sRGB',
+            'video/x-raw,format=BGRA,colorimetry=bt709',
+            'video/x-raw,format=BGRA',
+        ];
+        let applied = null;
+        for (const cs of capsStrs) {
+            try {
+                const c = Gst.Caps.from_string(cs);
+                if (c && !c.is_empty()) {
+                    cf.set_property('caps', c);
+                    applied = cs;
+                    break;
+                }
+            } catch (e) {}
+        }
+        if (!applied)
+            return null;
+        console.log(`[ExtPipeline] colour fix: CPU video-filter capsfilter="${applied}"`);
+        return bin;
+    }
+
+    _cancelColourFixPostTimer() {
+        if (this._colourFixTimerId) {
+            GLib.source_remove(this._colourFixTimerId);
+            this._colourFixTimerId = 0;
+        }
+    }
+
+    _scheduleColourFixPostReconfigure() {
+        this._cancelColourFixPostTimer();
+        this._colourFixTimerId = GLib.timeout_add(GLib.PRIORITY_LOW, 200, () => {
+            this._colourFixTimerId = 0;
+            if (this._colourAwaitingPostReconfigure)
+                this._evaluateColourFixAfterReconfigure();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _sinkCapsString() {
+        try {
+            const pad = this._videoSink?.get_static_pad?.('sink');
+            if (!pad)
+                return '';
+            const caps = pad.get_current_caps();
+            if (!caps || caps.is_empty())
+                return '';
+            return caps.to_string();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    _onColourFixAsyncDone() {
+        if (!gtkColourFixEnabled() || !this._pipeline || this._colourFixPhase !== 'light')
+            return;
+        const s = this._sinkCapsString();
+        if (!s)
+            return;
+
+        if (!this._colourReconfigureSent) {
+            try {
+                const pad = this._videoSink.get_static_pad('sink');
+                if (pad)
+                    pad.send_event(Gst.Event.new_reconfigure());
+            } catch (e) {}
+            this._colourReconfigureSent = true;
+            this._colourAwaitingPostReconfigure = true;
+            this._scheduleColourFixPostReconfigure();
+            return;
+        }
+
+        if (this._colourAwaitingPostReconfigure) {
+            this._cancelColourFixPostTimer();
+            this._evaluateColourFixAfterReconfigure();
+        }
+    }
+
+    _evaluateColourFixAfterReconfigure() {
+        if (!this._colourAwaitingPostReconfigure || this._colourFixPhase !== 'light')
+            return;
+        this._colourAwaitingPostReconfigure = false;
+        this._cancelColourFixPostTimer();
+
+        const s = this._sinkCapsString();
+        if (!capsNeedHeavyColourFix(s)) {
+            console.log('[ExtPipeline] colour fix: caps OK after reconfigure — staying on zero-copy/light path');
+            return;
+        }
+        this._transitionToHeavyColourPath(s);
+    }
+
+    _transitionToHeavyColourPath(capsStr) {
+        if (!this._pipeline || this._colourFixPhase !== 'light')
+            return;
+
+        const bin = this._buildCpuColourFilterBin();
+        if (!bin) {
+            console.warn('[ExtPipeline] colour fix: could not build heavy video-filter');
+            return;
+        }
+
+        const capsForLog = capsStr ?? this._sinkCapsString() ?? '(unknown)';
+        console.log(`[ExtPipeline] colour fix: engaging CPU heavy path — caps: ${capsForLog}`);
+
+        try {
+            this._pipeline.set_state(Gst.State.READY);
+            this._pipeline.set_property('video-filter', bin);
+            this._applyPlaybinForceFiltersOnly();
+            this._pipeline.set_state(Gst.State.PLAYING);
+            this._colourFixPhase = 'heavy-cpu';
+            console.log('[ExtPipeline] colour fix: heavy path active (cpu)');
+        } catch (e) {
+            console.warn(`[ExtPipeline] colour fix: heavy path failed: ${e.message}`);
+            try {
+                this._pipeline.set_property('video-filter', null);
+            } catch (e2) {}
+            this._clearOurPlaybinColourFlags();
+            this._colourFixPhase = 'light';
+        }
+    }
+
+    _resetColourFixForNewUri() {
+        this._cancelColourFixPostTimer();
+        this._colourFixPhase = 'light';
+        this._colourReconfigureSent = false;
+        this._colourAwaitingPostReconfigure = false;
+        if (!this._pipeline)
+            return;
+        if (!gtkColourFixEnabled()) {
+            this._clearOurPlaybinColourFlags();
+            try {
+                this._pipeline.set_property('video-filter', null);
+            } catch (e) {}
+            return;
+        }
+        this._clearOurPlaybinColourFlags();
+        try {
+            this._pipeline.set_property('video-filter', null);
+        } catch (e) {}
+    }
+
+    _resetColourCapsLog() {
+        this._lastLoggedColourCaps = '';
+        this._colourReconfigureSent = false;
+        this._colourAwaitingPostReconfigure = false;
+        this._cancelColourFixPostTimer();
+    }
+
+    _logGtkSinkColourCaps(context) {
+        try {
+            const pad = this._videoSink?.get_static_pad?.('sink');
+            if (!pad) {
+                console.log(`[ExtPipeline] colour caps (${context}): (no sink pad)`);
+                return;
+            }
+            const caps = pad.get_current_caps();
+            if (!caps || caps.is_empty()) {
+                console.log(`[ExtPipeline] colour caps (${context}): (empty — not negotiated yet)`);
+                return;
+            }
+            const s = caps.to_string();
+            if (s === this._lastLoggedColourCaps)
+                return;
+            this._lastLoggedColourCaps = s;
+            console.log(`[ExtPipeline] colour caps (${context}): ${s}`);
+        } catch (e) {
+            console.log(`[ExtPipeline] colour caps (${context}): (error ${e.message})`);
         }
     }
 
@@ -170,6 +462,12 @@ export default class Pipeline {
             } else if (msg.type === Gst.MessageType.ERROR) {
                 const [err, debug] = msg.parse_error();
                 console.error(`[ExtPipeline] GStreamer error: ${err.message} (${debug})`);
+            } else if (msg.type === Gst.MessageType.ASYNC_DONE) {
+                GLib.idle_add(GLib.PRIORITY_LOW, () => {
+                    this._logGtkSinkColourCaps('async-done');
+                    this._onColourFixAsyncDone();
+                    return GLib.SOURCE_REMOVE;
+                });
             }
         });
     }
@@ -177,26 +475,21 @@ export default class Pipeline {
     _onEOS() {
         if (this._videos.length === 1) {
             if (this._loop) {
-                // Single video loop — smooth seek to start
                 this._pipeline.seek_simple(
                     Gst.Format.TIME,
                     Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
                     0
                 );
             }
-            // If single video and !loop, pipeline naturally stops.
             return;
         }
 
-        // If we already queued a next URI in about-to-finish, nudge the
-        // pipeline back to PLAYING and let playbin continue seamlessly.
         if (this._queuedFromAboutToFinish) {
             this._queuedFromAboutToFinish = false;
             this._pipeline.set_state(Gst.State.PLAYING);
             return;
         }
 
-        // Multiple videos — advance to next
         if (this._randomOrder) {
             let next;
             do {
@@ -210,7 +503,9 @@ export default class Pipeline {
         const nextUri = GLib.filename_to_uri(this._videos[this._currentIndex], null);
         console.log(`[ExtPipeline] Playlist advancing to [${this._currentIndex}]: ${this._videos[this._currentIndex]}`);
         this._notifyTrackSwitch();
+        this._resetColourCapsLog();
         this._pipeline.set_state(Gst.State.READY);
+        this._resetColourFixForNewUri();
         this._pipeline.set_property('uri', nextUri);
         this._pipeline.set_state(Gst.State.PLAYING);
     }
@@ -234,6 +529,7 @@ export default class Pipeline {
         this._currentIndex = nextIndex;
         this._queuedFromAboutToFinish = true;
         this._notifyTrackSwitch();
+        this._resetColourCapsLog();
         this._pipeline.set_property('uri', nextUri);
         console.log(`[ExtPipeline] Queued next URI via about-to-finish [${nextIndex}]: ${this._videos[nextIndex]}`);
     }
@@ -276,24 +572,26 @@ export default class Pipeline {
         const nextUri = GLib.filename_to_uri(this._videos[this._currentIndex], null);
         this._queuedFromAboutToFinish = false;
         this._notifyTrackSwitch();
+        this._resetColourCapsLog();
         this._pipeline.set_state(Gst.State.READY);
+        this._resetColourFixForNewUri();
         this._pipeline.set_property('uri', nextUri);
         this._pipeline.set_state(Gst.State.PLAYING);
         console.log(`[ExtPipeline] Advanced to [${this._currentIndex}]: ${this._videos[this._currentIndex]}`);
         return true;
     }
 
-    // Change video at runtime.
     changeVideo(filePath) {
         if (!this._pipeline) return;
         const uri = GLib.filename_to_uri(filePath, null);
         console.log(`[ExtPipeline] Changing video to: ${filePath}`);
+        this._resetColourCapsLog();
         this._pipeline.set_state(Gst.State.READY);
+        this._resetColourFixForNewUri();
         this._pipeline.set_property('uri', uri);
         this._pipeline.set_state(Gst.State.PLAYING);
     }
 
-    // Replace the full playlist.
     setVideos(videos) {
         this._videos = videos;
         this._currentIndex = 0;
@@ -326,7 +624,6 @@ export default class Pipeline {
         const safeStart = Math.max(0.0, Math.min(1.0, startVol));
         const safeTarget = Math.max(0.0, Math.min(1.0, target));
 
-        // Keep legacy /10 scaling for GstController behavior.
         this._volumeControl.set(runningTime, safeStart / 10);
         this._volumeControl.set(endTime, safeTarget / 10);
     }
@@ -362,6 +659,7 @@ export default class Pipeline {
     }
 
     destroy() {
+        this._cancelColourFixPostTimer();
         if (this._bus) {
             this._bus.remove_signal_watch();
             this._bus = null;
@@ -375,5 +673,9 @@ export default class Pipeline {
         this._videoSink = null;
         this._volumeElement = null;
         this._volumeControl = null;
+        this._lastLoggedColourCaps = '';
+        this._weSetForceFilters = false;
     }
 }
+
+// Colour opt-out: LIVELOCKPAPER_GTK_COLOR_FIX=0. Caps trace: GST_DEBUG=GST_CAPS:5
