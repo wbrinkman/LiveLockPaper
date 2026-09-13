@@ -25,6 +25,13 @@ import { sendErrorNotification } from './utils/notifications.js';
 
 import { createActor } from './core/scalers.js';
 
+// The desktop session mode's name varies by distro ('user', 'ubuntu', 'gnome-classic', ...);
+// the lock/greeter modes are the only standardized names, so define "user mode" as their negation.
+function _isUserMode() {
+    const mode = Main.sessionMode.currentMode;
+    return mode !== 'unlock-dialog' && mode !== 'gdm' && mode !== 'initial-setup';
+}
+
 export default class LockscreenExtension extends Extension {
     enable() {
         const mode = Main.sessionMode.currentMode;
@@ -364,13 +371,18 @@ export default class LockscreenExtension extends Extension {
                 this._applyLockscreenTextCustomization();
                 this._restartKeepAwakeTimerIfNeeded();
             }
-        } else if (mode === 'user') {
+        } else if (_isUserMode()) {
             // Desktop — tear down lock screen, resume wallpaper
             console.log('[LiveLockPaper] → tearing down lock screen, resuming wallpaper');
             this._currentActivatedMode = mode;
+            // Capture the lock screen's clip + position before teardown destroys it,
+            // so the wallpaper can continue from the same spot instead of resuming
+            // where it was left off before locking.
+            const lockCarryOverPath = this._pipeline?.getVideoPath?.() ?? null;
+            const lockCarryOverPositionNs = this._pipeline?.queryPositionNs?.() ?? null;
             this._disableLockScreen();
             this._clearKeepAwakeTimer();
-            this._resumeWallpaper();
+            this._resumeWallpaper(lockCarryOverPath, lockCarryOverPositionNs);
         }
         this._syncStatusIndicator();
     }
@@ -1499,7 +1511,7 @@ export default class LockscreenExtension extends Extension {
             return;
         }
 
-        const isUserMode = Main.sessionMode.currentMode === 'user';
+        const isUserMode = _isUserMode();
         const wallpaperEnabled = this._settings.get_boolean(Keys.WALLPAPER_ENABLED);
         const lockscreenEnabled = this._settings.get_boolean(Keys.LOCKSCREEN_ENABLED);
         const hasRuntime = !!this._wpPlayerProcess || (this._wpPipelines && this._wpPipelines.length > 0);
@@ -1576,7 +1588,7 @@ export default class LockscreenExtension extends Extension {
         this._updatePauseWhenHiddenMenuLabel();
 
         // Define canToggleWallpaperFeatures for this function scope
-        const isUserMode = Main.sessionMode.currentMode === 'user';
+        const isUserMode = _isUserMode();
         const wallpaperEnabled = this._settings.get_boolean(Keys.WALLPAPER_ENABLED);
         const canToggleWallpaperFeatures = isUserMode && wallpaperEnabled;
 
@@ -1636,7 +1648,7 @@ export default class LockscreenExtension extends Extension {
     }
 
     _toggleWallpaperPlaybackFromMenu() {
-        if (Main.sessionMode.currentMode !== 'user')
+        if (!_isUserMode())
             return;
 
         const hasPipelines = this._wpPipelines && this._wpPipelines.length > 0;
@@ -1668,7 +1680,7 @@ export default class LockscreenExtension extends Extension {
     }
 
     _advanceWallpaperFromMenu() {
-        if (Main.sessionMode.currentMode !== 'user')
+        if (!_isUserMode())
             return;
 
         if (this._wpPlayerProcess) {
@@ -1699,7 +1711,7 @@ export default class LockscreenExtension extends Extension {
     }
 
     _restartWallpaperFromMenu() {
-        if (Main.sessionMode.currentMode !== 'user')
+        if (!_isUserMode())
             return;
         this._manualWallpaperPaused = false;
         this._wallpaperWasPaused = false;
@@ -1892,7 +1904,20 @@ export default class LockscreenExtension extends Extension {
 
         // For shared mode (non per-monitor), prepare the shared pipeline
         if (!this._lockscreenPerMonitor) {
-        const initialVideoPath = this._selectNextVideo();
+        // Carry over the wallpaper's current clip + position when it's also in the
+        // lock playlist, so locking feels like a continuation instead of a restart.
+        this._lockCarryOverPositionNs = null;
+        let initialVideoPath = null;
+        const wpPerMonitor = this._settings.get_boolean(Keys.WALLPAPER_PER_MONITOR);
+        const wpPipeline = (!wpPerMonitor && this._wpPipelines && this._wpPipelines[0]) || null;
+        const wpVideoPath = wpPipeline?.getVideoPath();
+        if (wpPipeline && wpVideoPath && this._videoPaths.includes(wpVideoPath)) {
+            initialVideoPath = wpVideoPath;
+            this._currentVideoIndex = this._videoPaths.indexOf(wpVideoPath);
+            this._lockCarryOverPositionNs = wpPipeline.queryPositionNs();
+        } else {
+            initialVideoPath = this._selectNextVideo();
+        }
         if (!initialVideoPath) {
             console.warning('Failed to select initial video, falling back')
             return;
@@ -2859,7 +2884,7 @@ export default class LockscreenExtension extends Extension {
                 } else {
                     // On wake, resume wallpaper if in desktop mode
                     const wallpaperEnabled = this._settings?.get_boolean(Keys.WALLPAPER_ENABLED);
-                    const shouldResume = Main.sessionMode.currentMode === 'user' && 
+                    const shouldResume = _isUserMode() && 
                         wallpaperEnabled &&
                         this._wallpaperWasPausedForSleep;
                     
@@ -2999,6 +3024,15 @@ export default class LockscreenExtension extends Extension {
         if (!this._pipeline.is_initialized()) {
             if (this._pipeline.init()) {
                 this._pipeline.play()
+                if (this._lockCarryOverPositionNs != null) {
+                    const posNs = this._lockCarryOverPositionNs;
+                    this._lockCarryOverPositionNs = null;
+                    // A freshly created pipeline isn't seekable instantly — wait until it
+                    // is, then ease in from a near-standstill up to normal speed.
+                    this._pipeline.seekToNsWhenReady(posNs, () => {
+                        this._pipeline.rampRate(0.02, 1.0, 4000);
+                    });
+                }
             }
         }
     }
@@ -3442,6 +3476,15 @@ export default class LockscreenExtension extends Extension {
         this._wpPipelines.forEach(p => {
             if (p.init()) p.play();
         });
+
+        // The desktop's resting state is a frozen frame — playback is a transient
+        // "waking up" effect tied to lock/unlock. A fresh start (first login, or any
+        // other cold (re)start of the wallpaper) gets the same ease-to-a-freeze as an
+        // unlock, so it doesn't just play forever until the first lock/unlock cycle.
+        if (!perMonitor && this._wpPipelines.length === 1) {
+            const wpPipeline = this._wpPipelines[0];
+            wpPipeline.rampRate(1.0, 0.02, 4000, () => wpPipeline.pause());
+        }
 
         // Fade in
         if (fadeInDuration > 0) {
@@ -3986,7 +4029,7 @@ export default class LockscreenExtension extends Extension {
     }
 
     _checkDesktopVisibilitySubprocess() {
-        if (Main.sessionMode.currentMode !== 'user') return;
+        if (!_isUserMode()) return;
         if (!this._wpPlayerProcess) return;
         if (this._wallpaperWasPaused) return;
         if (this._manualWallpaperPaused) return;
@@ -4386,7 +4429,7 @@ export default class LockscreenExtension extends Extension {
     // Pause/resume when desktop becomes hidden/visible.
     _checkDesktopVisibility() {
         // Don't interfere when lock screen is active or during transitions
-        if (Main.sessionMode.currentMode !== 'user') return;
+        if (!_isUserMode()) return;
         if (!this._wpPipelines || this._wpPipelines.length === 0) return;
         if (this._wallpaperWasPaused) return; // Paused for lock — don't interfere
         if (this._manualWallpaperPaused) return;
@@ -4688,7 +4731,7 @@ export default class LockscreenExtension extends Extension {
     }
 
     // Resume wallpaper after unlock, or re-enable if needed.
-    _resumeWallpaper() {
+    _resumeWallpaper(lockCarryOverPath = null, lockCarryOverPositionNs = null) {
         const hasPipelines = this._wpPipelines && this._wpPipelines.length > 0;
         const hasSubprocess = !!this._wpPlayerProcess;
 
@@ -4698,9 +4741,32 @@ export default class LockscreenExtension extends Extension {
         }
 
         if (this._wallpaperWasPaused && (hasPipelines || hasSubprocess)) {
+            // Continue from the lock screen's clip + position, then ease down to a
+            // freeze over a few seconds — mirrors the lock-side wake-up ramp.
+            let carriedOver = false;
             if (hasPipelines) {
-                console.log(`[Wallpaper] Resuming ${this._wpPipelines.length} pipeline(s)`);
-                this._wpPipelines.forEach(p => p.play());
+                const wpPerMonitor = this._settings.get_boolean(Keys.WALLPAPER_PER_MONITOR);
+                const wpPipeline = this._wpPipelines[0];
+                const wpVideoPaths = this._wpMonitorStates?.[0]?.videoPaths || [];
+                if (!wpPerMonitor && this._wpPipelines.length === 1 && wpPipeline
+                    && lockCarryOverPath && lockCarryOverPositionNs != null
+                    && wpVideoPaths.includes(lockCarryOverPath)) {
+                    console.log('[Wallpaper] Resuming with carried-over lock position, easing to a freeze');
+                    if (wpPipeline.getVideoPath() !== lockCarryOverPath) {
+                        wpPipeline.changeVideo(lockCarryOverPath, this._getWallpaperFramerate(lockCarryOverPath));
+                    } else {
+                        wpPipeline.play();
+                    }
+                    // changeVideo() (fresh pipeline) isn't seekable instantly; play()
+                    // (already-initialized) usually is — seekToNsWhenReady handles both.
+                    wpPipeline.seekToNsWhenReady(lockCarryOverPositionNs, () => {
+                        wpPipeline.rampRate(1.0, 0.02, 4000, () => wpPipeline.pause());
+                    });
+                    carriedOver = true;
+                } else {
+                    console.log(`[Wallpaper] Resuming ${this._wpPipelines.length} pipeline(s)`);
+                    this._wpPipelines.forEach(p => p.play());
+                }
             }
             if (hasSubprocess) {
                 console.log('[Wallpaper:GTK4] Resuming subprocess');
@@ -4708,35 +4774,38 @@ export default class LockscreenExtension extends Extension {
             }
             this._wallpaperWasPaused = false;
             this._wpDesktopHidden = false;
-            // Re-check visibility after a short delay.
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-                if (hasPipelines) this._checkDesktopVisibility();
-                if (hasSubprocess) {
-                    this._checkDesktopVisibilitySubprocess();
-                }
-                return GLib.SOURCE_REMOVE;
-            });
-            // Run one extra check + play nudge after lockscreen teardown settles.
-            // This avoids a stuck-paused state when transient unlock windows
-            // briefly trip the coverage check.
-            GLib.timeout_add(GLib.PRIORITY_DEFAULT, 900, () => {
-                if (Main.sessionMode.currentMode !== 'user')
+            // Re-check visibility after a short delay (skipped while easing to a freeze —
+            // the coverage check would otherwise fight the ramp with its own play()).
+            if (!carriedOver) {
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                    if (hasPipelines) this._checkDesktopVisibility();
+                    if (hasSubprocess) {
+                        this._checkDesktopVisibilitySubprocess();
+                    }
                     return GLib.SOURCE_REMOVE;
-                if (hasSubprocess && this._wpPlayerProcess) {
-                    this._wpPlayerProcess.play();
-                    this._checkDesktopVisibilitySubprocess();
-                }
-                if (hasPipelines && this._wpPipelines?.length > 0) {
-                    this._wpPipelines.forEach(p => p.play());
-                    this._checkDesktopVisibility();
-                }
-                this._syncStatusIndicator();
-                return GLib.SOURCE_REMOVE;
-            });
+                });
+                // Run one extra check + play nudge after lockscreen teardown settles.
+                // This avoids a stuck-paused state when transient unlock windows
+                // briefly trip the coverage check.
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, 900, () => {
+                    if (!_isUserMode())
+                        return GLib.SOURCE_REMOVE;
+                    if (hasSubprocess && this._wpPlayerProcess) {
+                        this._wpPlayerProcess.play();
+                        this._checkDesktopVisibilitySubprocess();
+                    }
+                    if (hasPipelines && this._wpPipelines?.length > 0) {
+                        this._wpPipelines.forEach(p => p.play());
+                        this._checkDesktopVisibility();
+                    }
+                    this._syncStatusIndicator();
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
             // After lock-screen windows are gone, clear auto-maximize on
             // wallpaper helpers so the dock doesn't dodge them.
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 600, () => {
-                if (Main.sessionMode.currentMode !== 'user')
+                if (!_isUserMode())
                     return GLib.SOURCE_REMOVE;
                 this._refreshGtkHelperWindowHints('post-resume-600ms');
                 return GLib.SOURCE_REMOVE;

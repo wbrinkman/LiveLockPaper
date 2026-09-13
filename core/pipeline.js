@@ -490,14 +490,151 @@ export default class Pipeline {
 
     play() {
         if (this._pipeline) {
+            this._cancelRateRamp();
             this._clearPlaybackTimeout()
             this._pipeline.set_state(Gst.State.PLAYING);
             this._easeVolume(this._volume, this._PLAYBACK_FADE_DUR);
         }
     }
 
+    getVideoPath() {
+        return this._videoPath;
+    }
+
+    // Current playback position in nanoseconds, or null if unavailable.
+    queryPositionNs() {
+        if (!this._pipeline) return null;
+        const [ok, pos] = this._pipeline.query_position(Gst.Format.TIME);
+        return ok ? pos : null;
+    }
+
+    seekToNs(positionNs) {
+        if (!this._pipeline || positionNs == null) return;
+        try {
+            this._pipeline.seek_simple(
+                Gst.Format.TIME,
+                Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                positionNs
+            );
+        } catch (e) {
+            console.error(`[Pipeline:${this._name}] seek failed: ${e.message}`);
+        }
+    }
+
+    // Like seekToNs, but waits until the pipeline can answer a position query first.
+    // A freshly created/initialized pipeline isn't seekable the instant init()+play()
+    // return — GStreamer needs real wall-clock time to finish PAUSED preroll — so a seek
+    // issued immediately after can be silently dropped, leaving playback at position 0.
+    // Calls onDone once the seek has actually been issued (or after maxWaitMs, best-effort).
+    seekToNsWhenReady(positionNs, onDone, maxWaitMs = 1000, pollMs = 30) {
+        if (!this._pipeline || positionNs == null) {
+            if (onDone) onDone();
+            return;
+        }
+        let waited = 0;
+        const poll = () => {
+            if (this._destroyed || !this._pipeline)
+                return GLib.SOURCE_REMOVE;
+            if (this.queryPositionNs() != null || waited >= maxWaitMs) {
+                this.seekToNs(positionNs);
+                if (onDone) onDone();
+                return GLib.SOURCE_REMOVE;
+            }
+            waited += pollMs;
+            return GLib.SOURCE_CONTINUE;
+        };
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, pollMs, poll);
+    }
+
+    getRate() {
+        return this._rate ?? 1.0;
+    }
+
+    // Change playback rate in place (GStreamer trick-play seek at the current position).
+    // rate must be > 0 — GStreamer doesn't allow a literal 0 rate; use pause() to freeze.
+    setRate(rate) {
+        if (!this._pipeline) return;
+        const posNs = this.queryPositionNs();
+        if (posNs == null) return;
+        try {
+            this._pipeline.seek(
+                rate,
+                Gst.Format.TIME,
+                Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                Gst.SeekType.SET, posNs,
+                Gst.SeekType.NONE, -1
+            );
+            this._rate = rate;
+        } catch (e) {
+            console.error(`[Pipeline:${this._name}] setRate(${rate}) failed: ${e.message}`);
+        }
+    }
+
+    // Change rate on the fly via GStreamer's "instant rate change" seek: a seek whose
+    // only job is a new rate (SeekType.NONE for both start and stop, no FLUSH — GStreamer
+    // rejects INSTANT_RATE_CHANGE combined with either). No flush means no re-preroll
+    // stutter, so this is safe to call frequently for a ramp — unlike setRate() above.
+    // Avoid calling it in the same tick as a position-changing seek (seekToNs/setRate);
+    // GStreamer needs the segment to settle first or it logs a critical and no-ops.
+    setRateInstant(rate) {
+        if (!this._pipeline) return;
+        try {
+            const ok = this._pipeline.seek(
+                rate,
+                Gst.Format.TIME,
+                Gst.SeekFlags.INSTANT_RATE_CHANGE,
+                Gst.SeekType.NONE, -1,
+                Gst.SeekType.NONE, -1
+            );
+            if (ok) this._rate = rate;
+        } catch (e) {
+            console.error(`[Pipeline:${this._name}] setRateInstant(${rate}) failed: ${e.message}`);
+        }
+    }
+
+    // Smoothly ramp playback rate from fromRate to toRate over durationMs via instant
+    // rate-change seeks (flush-free, so no per-step stutter). Linear rate-of-change:
+    // an eased curve front/back-loads the change and reads as a plateau-then-snap once
+    // it's clamped near zero — constant speed feels smoother end-to-end. The first step
+    // fires after one stepMs tick rather than synchronously, so it never lands in the
+    // same cycle as a preceding position seek (see setRateInstant's caveat above).
+    // Calls onDone when the ramp completes.
+    rampRate(fromRate, toRate, durationMs, onDone) {
+        this._cancelRateRamp();
+        const stepMs = 80;
+        const steps = Math.max(1, Math.round(durationMs / stepMs));
+        let step = 0;
+        this._rateRampTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, stepMs, () => {
+            if (this._destroyed || !this._pipeline) {
+                this._rateRampTimeoutId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+            step++;
+            const p = Math.min(1, step / steps);
+            const rate = fromRate + (toRate - fromRate) * p;
+            // Keep updating all the way down to a near-standstill crawl instead of
+            // holding a fixed low rate for the tail — onDone's pause() then only has
+            // to stop an already-barely-moving frame, not snap from a visible speed.
+            this.setRateInstant(Math.max(rate, 0.01));
+            if (p >= 1) {
+                this._rateRampTimeoutId = null;
+                if (onDone) onDone();
+                return GLib.SOURCE_REMOVE;
+            }
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _cancelRateRamp() {
+        if (this._rateRampTimeoutId) {
+            GLib.Source.remove(this._rateRampTimeoutId);
+            this._rateRampTimeoutId = null;
+        }
+    }
+
     pause() {
         if (this._pipeline) {
+            this._cancelRateRamp();
             this._clearPlaybackTimeout()
             this._easeVolume(0, this._PLAYBACK_FADE_DUR);
             this._playbackTimeoutId = GLib.timeout_add(
@@ -549,6 +686,7 @@ export default class Pipeline {
 
     destroy() {
         this._destroyed = true;
+        this._cancelRateRamp();
         this._clearPlaybackTimeout()
 
         if (this._dataTimeoutId) {
