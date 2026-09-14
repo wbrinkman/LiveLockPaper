@@ -872,6 +872,7 @@ export default class LockscreenExtension extends Extension {
             this._startKeepAwakeTimerIfNeeded();
         } else {
             this._clearKeepAwakeTimer();
+            this._resumeLockVideoFromBlank();
         }
 
         if (shield._loginSession)
@@ -918,10 +919,60 @@ export default class LockscreenExtension extends Extension {
                 // Stop wake-ups and let GNOME's native blank timeout handle blackout.
                 this._keepAwakeActiveOnce = true;
                 try { Main.screenShield?.emit?.('active-changed'); } catch (_) {}
+                // No point decoding/rendering behind a blanked screen.
+                this._pauseLockVideoForBlank();
                 return GLib.SOURCE_REMOVE;
             });
             GLib.Source.set_name_by_id(this._lockKeepAwakeTimeoutId, '[livelockpaper] lock-keep-awake-timeout');
         }
+    }
+
+    // Pause the lock video once GNOME's own screen-blank timeout takes over (see the
+    // keep-awake timeout above) — no point decoding/rendering behind a blanked display.
+    _pauseLockVideoForBlank() {
+        if (this._lockVideoPausedForBlank)
+            return;
+        this._lockVideoPausedForBlank = true;
+        if (this._pipeline) this._pipeline.pause();
+        if (this._lockPipelines) this._lockPipelines.forEach(p => p.pause());
+        // screenShield._setActive(false) does NOT fire from mere input on a blanked
+        // screen — GNOME only wakes the display; "shield active" stays true until an
+        // actual unlock attempt. Watch the stage directly for the wake instead.
+        if (!this._lockBlankWakeId) {
+            this._lockBlankWakeId = global.stage.connect('captured-event', (_actor, event) => {
+                const t = event.type();
+                if (t === Clutter.EventType.MOTION || t === Clutter.EventType.KEY_PRESS ||
+                    t === Clutter.EventType.BUTTON_PRESS || t === Clutter.EventType.TOUCH_BEGIN) {
+                    this._resumeLockVideoFromBlank();
+                }
+                return Clutter.EVENT_PROPAGATE;
+            });
+        }
+    }
+
+    // Resume it once activity wakes the screen back up (still locked).
+    _resumeLockVideoFromBlank() {
+        if (this._lockBlankWakeId) {
+            try { global.stage.disconnect(this._lockBlankWakeId); } catch (_) {}
+            this._lockBlankWakeId = null;
+        }
+        if (!this._lockVideoPausedForBlank)
+            return;
+        this._lockVideoPausedForBlank = false;
+        if (this._pipeline) this._pipeline.play();
+        if (this._lockPipelines) this._lockPipelines.forEach(p => p.play());
+        // TODO: the pipeline resumes decoding fine on its own (position is correct by
+        // the time you actually unlock), but the compositor keeps showing the last
+        // frame from before the blank and doesn't repaint with new ones until the real
+        // unlock transition — confirmed it's not a missing invalidation (Clutter.Image's
+        // set_data() already queues a redraw on every frame, and an explicit
+        // actor.queue_redraw() here doesn't help either). Looks like Mutter's stage frame
+        // clock itself stays stopped after a real DPMS blank until unlock, which isn't
+        // something we can reliably force from extension space. Left as-is: the CPU/GPU
+        // savings during blank are the win here, and the unlock-time seek already makes
+        // it land on the right frame — revisit if a non-hacky way to nudge Mutter's frame
+        // clock turns up.
+        if (this._actors) this._actors.forEach(a => { try { a.queue_redraw(); } catch (_) {} });
     }
 
     _restartKeepAwakeTimerIfNeeded() {
@@ -2493,6 +2544,11 @@ export default class LockscreenExtension extends Extension {
         this._clearLockTextTimer();
         this._clearLockTextCommandState();
         this._clearKeepAwakeTimer();
+        if (this._lockBlankWakeId) {
+            try { global.stage.disconnect(this._lockBlankWakeId); } catch (_) {}
+            this._lockBlankWakeId = null;
+        }
+        this._lockVideoPausedForBlank = false;
         try { this._lockTextCmdLabel?.destroy(); } catch (_) {}
         try { this._lockTextOverlayLayer?.destroy(); } catch (_) {}
         this._lockTextCmdLabel = null;
