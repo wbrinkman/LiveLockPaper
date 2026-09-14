@@ -1879,9 +1879,10 @@ export default class LockscreenExtension extends Extension {
             this._incrementPlayCountForMetadataKey(Keys.VIDEO_METADATA, videoPath);
         };
 
-        // Force gpuColorConversion OFF for lock screen (GL contexts can deadlock during lock transition)
+        // gpuColorConversion follows the debug setting here (previously forced off — GL
+        // contexts were reported to deadlock during the lock transition; watch for that).
         this._lockPerMonitorConfig = lockPerMonitorConfig;
-        this._lockPipelineParams = { loop, autoFps, manualFramerate, skipFrame, preferHwDecoder, gpuColorConversion: false, adaptivePolling };
+        this._lockPipelineParams = { loop, autoFps, manualFramerate, skipFrame, preferHwDecoder, gpuColorConversion, adaptivePolling };
 
         // Build connector map for per-monitor mode
         if (this._lockscreenPerMonitor) {
@@ -1942,7 +1943,7 @@ export default class LockscreenExtension extends Extension {
                 targetWidth: maxW,
                 targetHeight: maxH,
                 preferHwDecoder: preferHwDecoder,
-                gpuColorConversion: false, // Force CPU conversion for lock screen (GL deadlocks)
+                gpuColorConversion: gpuColorConversion, // was forced false — GL deadlock risk during lock transition
                 adaptivePolling: adaptivePolling,
                 name: 'ls-shared',
             dataCallback: this._drawImages.bind(this),
